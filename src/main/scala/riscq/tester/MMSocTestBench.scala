@@ -234,87 +234,97 @@ object TestMMSocPulse extends App {
     }
 }
 
-// object TestMMSocReadout extends App {
-//   import MMSocTestConfig._
-//   simConfig
-//     .compile {
-//       val dut = MemoryMapSoc(
-//         qubitNum = 8,
-//         withVivado = false,
-//         withCocotb = false,
-//         withWhitebox = true,
-//         withTest = true
-//       ) 
-//       dut.pgs.map { _.io.simPublic() }
-//       dut.cgs.map { _.io.simPublic() }
-//       dut
-//     }
-//     .doSim { dut =>
-//       val driver = new Driver(dut)
-//       import driver._
+object TestMMSocReadout extends App {
+  import MMSocTestConfig._
+  simConfig
+    .compile {
+      val dut = MemoryMapSoc(
+        qubitNum = 4,
+        withVivado = false,
+        withCocotb = false,
+        withWhitebox = true,
+        withTest = true
+      ) 
+      dut.pgs.map { _.io.simPublic() }
+      dut.cgs.map { _.io.simPublic() }
+      dut.rds.map { _.io.simPublic() }
+      dut
+    }
+    .doSim { dut =>
+      val driver = new Driver(dut)
+      import driver._
 
-//       init()
+      init()
 
-//       val adc_id = 0
-//       val freq = 1.0 / 100
-//       val amp = 1.0
-//       val batchSize = 4
-//       val adcLogic = fork {
-//         val phaseAdc = 0.0
-//         while(true) {
-//           for(i <- 0 until batchSize) {
-//             val time = dutTime - 19
-//             val ar = math.cos((time * batchSize + i).toDouble * freq * math.Pi + phaseAdc)
-//             val ai = -math.sin((time * batchSize + i).toDouble * freq * math.Pi + phaseAdc)
-//             dut.test_adc(adc_id)(i).r #= ar * amp
-//             dut.test_adc(adc_id)(i).i #= ai * amp
-//           }
-//           cd.waitSampling()
-//         }
-//       }
+      val adc_id = 2
+      val adcLogic = fork {
+        def freq_ghz(f: Double) = f * math.Pi
+        val freq = freq_ghz(0.1)
+        // f ghz
+        // t + 1 -> time + 2ns -> phase + 2 * f * 2 pi = f * 4 pi
 
-//       val elfFile = new File("compiler-scripts/rd_test.elf")
-//       val elf = new Elf(elfFile, addressWidth = 32)
-//       elf.load(dut.mem.mem, -0x80000000)
+        // t+1 -> phase + 4 * freq * pi
+        // 0.1ghz
+        // 1ns -> phase + 0.1 * 2pi
+        // 2ns -> phase + 0.2 * 2pi = 4 point
+        // 1point -> phase + 0.1 * pi
+        val amp = 1.0
+        val batchSize = 4
+        val phaseAdc = 0.0
+        while(true) {
+          for(i <- 0 until batchSize) {
+            val time = dutTime - 19
+            val ar = math.cos((time * batchSize + i).toDouble * freq + phaseAdc)
+            val ai = -math.sin((time * batchSize + i).toDouble * freq + phaseAdc)
+            dut.test_adc(adc_id)(i).r #= ar * amp
+            dut.test_adc(adc_id)(i).i #= ai * amp
+          }
+          cd.waitSampling()
+        }
+      }
 
-//       val startTime = 50
+      val elfFile = new File("compiler-scripts/rd_test.elf")
+      val elf = new Elf(elfFile, addressWidth = 32)
+      elf.load(dut.mem.mem, -0x80000000)
 
-//       dut.riscq_rst #= true
-//       tick(10)
-//       dut.riscq_rst #= false
+      val startTime = 50
 
-//       // val monitor = new Monitor(dut.dBus.bus, cd)
-//       // val pcReset = 0x80000000l
-//       // monitor.add(new MonitorSubscriber {
-//       //   override def onA(a: TransactionA) = {println(s"${simTime()}"); println(a)}
-//       //   override def onD(d: TransactionD) = {println(s"!!!!!!!${simTime()}");println(d)}
-//       // })
+      dut.riscq_rst #= true
+      tick(10)
+      dut.riscq_rst #= false
 
-//       tick(40)
-//       for(t <- 100 until 500 by 100) {
-//         waitUntil(t - 1)
-//         for(i <- 0 until 10) {
-//           logTime()
-//           logDac(0)
-//           tick()
-//         }
-        
-//       }
-//       for (i <- 0 until 10) {
-//         // println(s"${dut.mem.mem.getBigInt(0).toString(16)}")
-//         // println(s"${dut.mem.mem.getBigInt(0x1d).toString(16)}")
-//         // println(s"${dut.mmFiber.logic.cgParams(0).cgIo.freq.toDouble}")
-//         // println(s"bypass: ${wb.hazard.bypass_1.map{case (id, data) => (id, data.toBoolean)}}")
-//         logTime()
-//         // logBranch()
-//         // logHazard()
-//         // logPcs()
-//         // logSrc()
-//         // logExInsts()
-//         logDac(2)
-//         // logCarrier(0)
-//         println("")
-//         tick()
-//       }
-//     }
-// }
+      val monitor = new Monitor(dut.dBus.bus, cd)
+      val pcReset = 0x80000000l
+      monitor.add(new MonitorSubscriber {
+        override def onA(a: TransactionA) = {println(s"${simTime()}"); println(a)}
+        override def onD(d: TransactionD) = {println(s"!!!!!!!${simTime()}");println(d)}
+      })
+
+      tick(30)
+      waitUntil(60)
+      for (i <- 0 until 60) {
+        // println(s"${dut.mem.mem.getBigInt(0).toString(16)}")
+        // println(s"${dut.mem.mem.getBigInt(0x1d).toString(16)}")
+        // println(s"${dut.mmFiber.logic.cgParams(0).cgIo.freq.toDouble}")
+        // println(s"bypass: ${wb.hazard.bypass_1.map{case (id, data) => (id, data.toBoolean)}}")
+        logTime()
+        // logBranch()
+        // logHazard()
+        // logPcs()
+        // logSrc()
+        // logExInsts()
+        // logDac(2)
+        // logCarrier(10)
+        println(s"cmdv: ${dut.rds(2).io.cmd.valid.toBoolean}, cmdp: ${dut.rds(2).io.cmd.payload.toBigInt}, rspv: ${dut.rds(2).io.res.valid.toBoolean}, rspp: ${dut.rds(2).io.res.payload.toBoolean}")
+        println(s"carrier: ${dut.rds(2).io.carrier.map{c => c.r.toDouble}}")
+        println(s"adc: ${dut.rds(2).io.adc.map{c => c.r.toDouble}}")
+        println(s"demod: ${dut.rds(2).io.demodData.payload.map{c => c.r.toDouble}}")
+        println("")
+        tick()
+      }
+
+      for(i <- 0 until dut.qubitNum * 3) {
+        println(s"$i: ${dut.cgs(i).spec.batchSize}")
+      }
+    }
+}

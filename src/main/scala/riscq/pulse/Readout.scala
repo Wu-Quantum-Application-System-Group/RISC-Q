@@ -280,7 +280,7 @@ case class ReadoutDecoder(batchSize: Int, inWidth: Int, accWidth: Int, timeWidth
   cmp.io.refI := refI
   cmp.io.refR := refR
   io.res.payload := cmp.io.res
-  io.res.valid := False
+  io.res.valid := resValid
 
   val fsm = new StateMachine {
     val idle = makeInstantEntry()

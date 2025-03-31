@@ -23,6 +23,7 @@
 #define MTIMEWAIT 0x4008
 
 #define FREQ_GHZ(x) (int)(x * (1 << 13))
+#define DEMOD_FREQ_GHZ(x) (int)(x * (1 << 15))
 #define TIME_NS(x) (int)(x / 2)
 #define PHASE_PI(x) (int)(x * (1 << 15))
 
