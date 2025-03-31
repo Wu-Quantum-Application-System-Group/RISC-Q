@@ -18,3 +18,4 @@ build
 .vscode
 *.tldr
 bench
+*.elf
