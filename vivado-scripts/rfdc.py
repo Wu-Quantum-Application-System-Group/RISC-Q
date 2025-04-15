@@ -1,70 +1,12 @@
+import json
+import sys
+
 ids = [f'{i}'+f'{j}' for i in range(4) for j in range (4)]
 
-# dac_map = {
-#     'DAC0': '00',
-#     'DAC1': '01',
-#     'DAC2': '02',
-#     'DAC3': '03'
-# }
-
-# adc_map = {
-#     'ADC0': '00',
-#     'ADC1': '01',
-#     'ADC2': '02',
-#     'ADC3': '03'
-# }
-
-# 4 qubits
-
-# dac_map = {
-#     'DAC0': '00',
-#     'DAC1': '01',
-#     'DAC2': '02',
-#     'DAC3': '03',
-#     'DAC4': '10',
-#     'DAC5': '11',
-#     'DAC6': '12',
-#     'DAC7': '13',
-# }
-
-# adc_map = {
-#     'ADC0': '00',
-#     'ADC1': '01',
-#     'ADC2': '02',
-#     'ADC3': '03',
-# }
-
-# 8 qubits
-
-dac_map = {
-    'DAC0': '00',
-    'DAC1': '01',
-    'DAC2': '02',
-    'DAC3': '03',
-    'DAC4': '10',
-    'DAC5': '11',
-    'DAC6': '12',
-    'DAC7': '13',
-    'DAC8': '20',
-    'DAC9': '21',
-    'DAC10': '22',
-    'DAC11': '23',
-    'DAC12': '30',
-    'DAC13': '31',
-    'DAC14': '32',
-    'DAC15': '33',
-}
-
-adc_map = {
-    'ADC0': '00',
-    'ADC1': '01',
-    'ADC2': '02',
-    'ADC3': '03',
-    'ADC4': '10',
-    'ADC5': '11',
-    'ADC6': '12',
-    'ADC7': '13'
-}
+def read_dac_adc(filename):
+    with open(filename, 'r') as file:
+        maps = json.load(file)
+    return maps["dac_map"], maps["adc_map"]
 
 def dac_intf_to_tile(intf: str):
     return intf[0]
@@ -183,6 +125,11 @@ CONFIG.DAC_Slice%(i)d%(j)d_Enable {true}
     return res
 
 if __name__ == '__main__':
+    if len(sys.argv) < 2:
+        filename = "configs/8-qubits.json"
+    else:
+        filename = sys.argv[1]
+    dac_map, adc_map = read_dac_adc(filename)
     dac_tiles = collect_dac_tile(dac_map)
     adc_tiles = collect_dac_tile(adc_map)
     print(create_intfs(dac_map, adc_map))
