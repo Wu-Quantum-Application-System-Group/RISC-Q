@@ -288,6 +288,7 @@ object MMSocParams {
     plugins += new execute.WriteBackPlugin(riscv.IntRegFile, writeAt = 2)
     plugins += new execute.IntFormatPlugin()
     plugins += new execute.IntAluPlugin(executeAt = 0, formatAt = 0)
+    plugins += new execute.MulPlugin(splitAt = 0, partialMulAt = 0, add1At = 1, add2At = 2, formatAt = 2)
     plugins += new execute.BarrelShifterPlugin(shiftAt = 0, formatAt = 0)
     plugins += new execute.BranchPlugin(aluAt = 0, jumpAt = 1, wbAt = 0)
     plugins += new execute.lsu.LsuCachelessPlugin(addressAt = 0, forkAt = 0, joinAt = 1, wbAt = 2)
@@ -601,7 +602,7 @@ object GenMMSocVivado extends App {
     romReuse = true
   ).generate(
     MemoryMapSoc(
-      qubitNum = 8,
+      qubitNum = 4,
       withVivado = true,
       withCocotb = false,
       withWhitebox = false,
