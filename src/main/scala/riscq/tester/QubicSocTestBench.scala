@@ -32,7 +32,7 @@ class Driver(dut: QubicSoc) {
 
     cd.assertReset()
     cd100m.assertReset()
-    cd100m.waitRisingEdge(0)
+    cd100m.waitRisingEdge(10)
     cd.deassertReset()
     cd100m.deassertReset()
   }
@@ -95,6 +95,7 @@ object TestQubicPulse extends App {
       import qbAsm._
 
       init()
+      dut.riscq_rst #= true
 
       val batchSize = 16
       val dataWidth = 16

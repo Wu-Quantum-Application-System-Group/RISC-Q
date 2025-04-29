@@ -43,11 +43,17 @@ class PulseGeneratorPlugin(qubitNum: Int) extends ExecutionUnit {
     pgs.foreach { _.addAttribute("KEEP_HIERARCHY", "TRUE") }
     val pgs_io = Vec(pgs.map(_.io))
 
+    val memPorts = Vec(pgs_io.map(io => master(cloneOf(io.memPort))))
+    (memPorts zip pgs).foreach{case (m, p) => m <> p.io.memPort}
+    val pulses = Vec(pgs_io.map(io => master(cloneOf(io.pulse))))
+    (pulses zip pgs).foreach{case (pulse, p) => pulse := p.io.pulse}
+
     awaitBuild()
     uopRetainer.release()
     new pp.Execute(0) {
       /* Get time from timer plugin */
       val timer = host[TimerPlugin]
+      timer.logic.await()
       for (i <- 0 until (qubitNum * 2)) {
         // pgs_io(i).time := RegNext(timer.logic.time).addAttribute("EQUIVALENT_REGISTER_REMOVAL", "NO")
         pgs_io(i).time := timer.logic.time

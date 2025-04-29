@@ -183,7 +183,8 @@ case class QubicSoc(
   plugins += new execute.BarrelShifterPlugin(shiftAt = 0, formatAt = 0)
   plugins += new execute.BranchPlugin(aluAt = 0, jumpAt = 1, wbAt = 0)
   plugins += new execute.lsu.LsuCachelessPlugin(addressAt = 0, forkAt = 0, joinAt = 1, wbAt = 2)
-  plugins += new execute.TimerPlugin()
+  val tp = new execute.TimerPlugin()
+  plugins += tp
   val pgp = new execute.PulseGeneratorPlugin(qubitNum)
   plugins += pgp
   /* Carrier plugin NYI */
@@ -231,20 +232,6 @@ case class QubicSoc(
     val core = RiscQ(plugins).addAttribute("KEEP_HIERARCHY", "TRUE")
   }
   val core = riscqArea.core
-  val pgs = pgp.logic.pgs
-
-  // TODO `DspConnectionArea(qubitNum, pgs, pulseMems, dcgs, rds)`
-  // Can't write that until dcgs and rds are re-introduced.
-  (pgs zip pulseMems).foreach {
-    case (x, y) => {
-      y.fastPort.enable := True
-      y.fastPort.write := False
-      y.fastPort.mask.setAllTo(False)
-      y.fastPort.wdata.setAllTo(False)
-      y.fastPort.address := x.io.memPort.cmd.payload
-      x.io.memPort.rsp := RegNext(y.fastPort.rdata)
-    }
-  }
 
   /* -- DAC and ADC -- */
   // just DAC for now, for pulse instruction
@@ -254,10 +241,33 @@ case class QubicSoc(
     riscq.misc.Axi4StreamVivadoHelper.addStreamInference(d, s"DAC${id}_AXIS")
   }
   // pulse generator output
-  for ((o, pg) <- (dac zip pgs)) {
-    o.payload := pg.io.pulse.payload.map(_.r).asBits()
-    o.valid := True
+  Fiber build {
+    val pgp = riscqArea.core.host[PulseGeneratorPlugin]
+    val pgs = pgp.logic.pgs
+    val memPorts = pgp.logic.memPorts
+    val pulses = pgp.logic.pulses
+
+    // TODO `DspConnectionArea(qubitNum, pgs, pulseMems, dcgs, rds)`
+    // Can't write that until dcgs and rds are re-introduced.
+
+    (memPorts zip pulseMems).foreach {
+      case (x, y) => {
+        y.fastPort.enable := True
+        y.fastPort.write := False
+        y.fastPort.mask.setAllTo(False)
+        y.fastPort.wdata.setAllTo(False)
+        y.fastPort.address := x.cmd.payload
+        x.rsp := RegNext(y.fastPort.rdata)
+      }
+    }
+
+    for ((o, pulse) <- (dac zip pulses)) {
+
+      o.payload := pulse.payload.map(_.r).asBits()
+      o.valid := pulse.valid
+    }
   }
+
 
   Fiber build new Area {
     withTest generate tlBus.node.bus.get.simPublic()
