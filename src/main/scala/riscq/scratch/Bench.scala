@@ -7,7 +7,7 @@ import spinal.lib.eda.bench.Bench
 import riscq.misc.XilinxRfsocTarget
 import riscq.memory.DualClockRam
 import riscq.memory.DualClockRamTest
-import riscq.pulse.TimedQueue
+import riscq.pulse.TimedFifo
 import riscq.pulse.PulseGenerator
 
 object ManyRegs extends App {
@@ -275,7 +275,7 @@ object BramOutRegInfer extends App {
 
 object BenchTimedQueue extends App {
   val rtl= Rtl(SpinalVerilog(
-    TimedQueue(Bits(32 bit), 2, 32)
+    TimedFifo(Bits(32 bit), 2, 32)
   ))
   Bench(List(rtl), XilinxRfsocTarget(1000 MHz), "./bench/")
 }
@@ -286,7 +286,7 @@ object BenchPulseGenerator extends App {
   val addrWidth = 12
   val timeWidth = 32
   val rtl= Rtl(SpinalVerilog(
-    PulseGenerator(batchSize, dataWidth, addrWidth, timeWidth, queueDepth = 4)
+    PulseGenerator(batchSize, dataWidth, addrWidth, timeWidth, fifoDepth = 4)
   ))
   Bench(List(rtl), XilinxRfsocTarget(1000 MHz), "./bench/")
 }

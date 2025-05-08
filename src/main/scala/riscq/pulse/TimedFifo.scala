@@ -5,7 +5,7 @@ import spinal.core.sim._
 import spinal.lib._
 
 // pop at time + 1
-case class TimedQueue[T <: Data](
+case class TimedFifo[T <: Data](
   dataType: HardType[T],
   depth: Int,
   timeWidth: Int
@@ -39,9 +39,9 @@ case class TimedQueue[T <: Data](
   io.pop.valid := fifo.io.pop.valid && doPop
 }
 
-object TestTimedQueue extends App {
+object TestTimedFifo extends App {
   SimConfig.compile{
-    val dut = TimedQueue(UInt(32 bit), 2, 32)
+    val dut = TimedFifo(UInt(32 bit), 2, 32)
     dut.fifo.io.simPublic()
     dut
   }.doSimUntilVoid{ dut =>

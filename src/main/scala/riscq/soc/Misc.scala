@@ -112,7 +112,7 @@ case class RFArea(qubitNum: Int) extends Area {
         memLatency =
           1 + 1, // sync read latency + out reg
         timeInOffset = 1,
-        queueDepth = 4
+        fifoDepth = 4
       )
     )
     pgs.foreach { pg => 
