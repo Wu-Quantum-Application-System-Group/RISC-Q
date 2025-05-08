@@ -91,7 +91,13 @@ case class HostBusArea(withTest: Boolean) extends Area {
 
 case class RFArea(qubitNum: Int) extends Area {
   val time = UInt(32 bit)
+  val timeBuf = RegNext(time)
+  timeBuf.addAttribute("MAX_FANOUT", "32")
+
   val startTime = Reg(UInt(32 bit))
+  val startTimeBuf = RegNext(startTime)
+  startTimeBuf.addAttribute("MAX_FANOUT", "32")
+
   val rfRst = Bool()
 
   val envAddrWidth = 12
