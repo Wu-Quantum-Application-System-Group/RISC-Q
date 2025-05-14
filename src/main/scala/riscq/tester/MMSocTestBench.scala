@@ -171,7 +171,7 @@ object TestMMSocPulse extends App {
       }
       hostCd.waitRisingEdge()
 
-      val elfFile = new File("compiler-scripts/build/pg_test.elf")
+      val elfFile = new File("software-example/build/pg_test.elf")
       val elf = new Elf(elfFile, addressWidth = 32)
       elf.load(dut.mem.mem, -0x80000000)
 
@@ -260,7 +260,7 @@ object TestMMSocReadout extends App {
         )
       }
 
-      val elfFile = new File("compiler-scripts/build/rd_test.elf")
+      val elfFile = new File("software-example/build/rd_test.elf")
       val elf = new Elf(elfFile, addressWidth = 32)
       elf.load(dut.mem.mem, -0x80000000)
 

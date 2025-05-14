@@ -13,6 +13,7 @@ sim_build
 
 .metals
 .bloop
+.venv
 .bsp
 .Ds_Store
 

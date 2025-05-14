@@ -1,3 +1,3 @@
 #!/bin/bash
 
-docker build -t webtop-vivado-spinal .
+docker build -t riscq-dev .
