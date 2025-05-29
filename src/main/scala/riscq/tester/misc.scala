@@ -74,7 +74,8 @@ class RvAssembler(wordWidth: Int) {
   }
 
   def beq(rs1: Int, rs2: Int, imm: Int) = typeB("1100011", "000", imm, rs1, rs2)
-
+  def bne(rs1: Int, rs2: Int, imm: Int) = typeB("1100011", "001", imm, rs1, rs2)
+  
   def typeS(opcode: String, funct3: String, imm: Int, rs1: Int, rs2: Int) = {
     assert(opcode.length == 7)
     assert(funct3.length == 3)
@@ -91,78 +92,35 @@ class RvAssembler(wordWidth: Int) {
     res
   }
   def sw(rs2: Int, imm: Int, rs1: Int): String = typeS("0100011", "010", imm = imm, rs1 = rs1, rs2 = rs2)
+
+  def typeU(opcode: String, imm: Int, rd: Int): String = {
+    assert(opcode.length == 7)
+    val immStr = ByteHelper.intToBinStr(imm, 20)
+    var res = immStr
+    res += ByteHelper.intToBinStr(rd, 5)
+    res += opcode
+    assert(res.length == 32)
+    res = "0" * (wordWidth - 32) + res
+    res
+  }
+
+  def lui(rd: Int, imm20: Int) : String = typeU("0110111", imm20, rd)
 }
 
-// class QubicAssembler {
-//   def setTime(resetTime: Int) = {
-//     var res = ""
-//     res += ByteHelper.intToBinStr(resetTime, 32)
-//     res += "0" * 64
-//     val opcode = "00000000000000000011000101111111"
-//     res += opcode
-//     res
-//   }
-//   def waiti(waitUntil: Int) = {
-//     var res = ""
-//     res += ByteHelper.intToBinStr(waitUntil, 32)
-//     res += "0" * 64
-//     val opcode = "00000000000000000011000111111111"
-//     res += opcode
-//     res
-//   }
-//   def carrier(freq: Int, phase: Int, id: Int = 0, freqWidth: Int = 16, phaseWidth: Int = 16): String = {
-//     var res = ""
-//     res += ByteHelper.intToBinStr(id, 5)
-//     res += ByteHelper.intToBinStr(freq, freqWidth)
-//     res += ByteHelper.intToBinStr(phase, phaseWidth)
-//     val opcode = "011000011111111"
-//     val zeroLength = 128 - res.length() - opcode.length()
-//     res += "0" * zeroLength + opcode
-//     res
-//   }
-//   def pulse(puop: PulseOpParam, start: Int, addr: Int, duration: Int, phase: Int, freq: Int, amp: Int, id: Int = 0): String = {
-//     var res = ""
-//     res += ByteHelper.intToBinStr(id, puop.idWidth)
-//     res += ByteHelper.intToBinStr(phase, puop.phaseWidth)
-//     res += ByteHelper.intToBinStr(freq, puop.freqWidth)
-//     res += ByteHelper.intToBinStr(duration, puop.durationWidth)
-//     res += ByteHelper.intToBinStr(start, puop.startWidth)
-//     res += ByteHelper.intToBinStr(addr, puop.addrWidth)
-//     res += ByteHelper.intToBinStr(amp, puop.ampWidth)
-//     // val idStr = ByteHelper.intToBinStr(id, puop.idWidth)
-//     val opcode = "011000001111111"
-//     // val zeroLength = 128 - res.length() - idStr.length() - opcode.length()
-//     val zeroLength = 128 - res.length() - opcode.length()
-//     // res += "0" * zeroLength + idStr + opcode
-//     res += "0" * zeroLength + opcode
-//     res
-//   }
-//   def readout(id: Int, time: Int, start: Int = 0): String = {
-//     val startStr = ByteHelper.intToBinStr(start, 32)
-//     val timeStr = ByteHelper.intToBinStr(time, 12)
-//     var idStr = ByteHelper.intToBinStr(id, 5)
-//     val opcode = "1111011"
-//     val funct3 = "000"
-//     val zeroLength = 128 - startStr.length - timeStr.length - idStr.length - funct3.length - 5 - opcode.length 
-//     val res = startStr + "0"*zeroLength + timeStr + idStr + funct3 + "00000" + opcode
-//     res
-//   }
-//   def rowbr(id: Int, rd: Int): String = {
-//     var idStr = ByteHelper.intToBinStr(id, 5)
-//     val rdStr = ByteHelper.intToBinStr(rd, 5)
-//     val opcode = "1111011"
-//     val funct3 = "001"
-//     val zeroLength = 128 - idStr.length - funct3.length - rdStr.length - opcode.length
-//     val res = "0"*zeroLength + idStr + funct3 + rdStr + opcode
-//     res
-//   }
-//   def rowbi(id: Int, rd: Int): String = {
-//     var idStr = ByteHelper.intToBinStr(id, 5)
-//     val rdStr = ByteHelper.intToBinStr(rd, 5)
-//     val opcode = "1111011"
-//     val funct3 = "010"
-//     val zeroLength = 128 - idStr.length - funct3.length - rdStr.length - opcode.length
-//     val res = "0"*zeroLength + idStr + funct3 + rdStr + opcode
-//     res
-//   }
-// }
+class QubicAssembler {
+  def pulse(start: Int, addr: Int, duration: Int, phase: Int, freq: Int, amp: Int, id: Int = 0): String = {
+    import riscq.soc.QubicSocParams._
+    var res = ""
+    res += ByteHelper.intToBinStr(id, pulseIdWidth)
+    res += ByteHelper.intToBinStr(phase, pulsePhaseWidth)
+    res += ByteHelper.intToBinStr(freq, pulseFreqWidth)
+    res += ByteHelper.intToBinStr(duration, pulseDurWidth)
+    res += ByteHelper.intToBinStr(start, pulseStartWidth)
+    res += ByteHelper.intToBinStr(addr, pulseAddrWidth)
+    res += ByteHelper.intToBinStr(amp, pulseAmpWidth)
+    val opcode = "011000001111111"
+    val zeroLength = 128 - res.length() - opcode.length()
+    res += "0" * zeroLength + opcode
+    res
+  }
+}
