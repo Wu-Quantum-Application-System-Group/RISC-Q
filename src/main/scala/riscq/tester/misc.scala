@@ -74,6 +74,7 @@ class RvAssembler(wordWidth: Int) {
   }
 
   def beq(rs1: Int, rs2: Int, imm: Int) = typeB("1100011", "000", imm, rs1, rs2)
+  def bne(rs1: Int, rs2: Int, imm: Int) = typeB("1100011", "001", imm, rs1, rs2)
 
   def typeS(opcode: String, funct3: String, imm: Int, rs1: Int, rs2: Int) = {
     assert(opcode.length == 7)
