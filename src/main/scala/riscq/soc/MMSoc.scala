@@ -23,49 +23,6 @@ import spinal.lib.bus.misc.SingleMapping
 import spinal.lib.misc.PathTracer
 import riscq.misc.VivadoClkHelper
 
-object MMSocParams {
-  val pulseMemOutReg = true
-
-  val rfReadSync = false
-  val rfReadAt = -1 - rfReadSync.toInt
-  val enableBypass = true
-
-  def getPlugins(qubitNum: Int) = new Area {
-    val pcReset = 0x80000000L
-    val plugins = ArrayBuffer[FiberPlugin]()
-    val pp = new schedule.PipelinePlugin()
-    plugins += pp
-    plugins += new riscv.RiscvPlugin(xlen = 32)
-    plugins += new schedule.ReschedulePlugin()
-    plugins += new fetch.PcPlugin()
-    plugins += new fetch.FetchCachelessPlugin(
-      wordWidth = 32,
-      forkAt = 0,
-      joinAt = 4
-    )
-    // plugins += new decode.DecoderSimplePlugin(decodeAt = 0)
-    plugins += new decode.DecoderPlugin(decodeAt = 0)
-    plugins += new regfile.RegFilePlugin(
-      spec = riscv.IntRegFile,
-      physicalDepth = 32,
-      preferedWritePortForInit = "",
-      syncRead = rfReadSync,
-      dualPortRam = false,
-      maskReadDuringWrite = false
-    )
-    plugins += new execute.RegReadPlugin(rfReadAt = rfReadAt, enableBypass = enableBypass)
-    plugins += new execute.SrcPlugin(executeAt = 0, relaxedRs = true)
-    plugins += new schedule.HazardPlugin(rfReadAt = rfReadAt, hazardAt = rfReadAt, enableBypass = enableBypass)
-    plugins += new execute.WriteBackPlugin(riscv.IntRegFile, writeAt = 2, allowBypassFrom = 1)
-    plugins += new execute.IntFormatPlugin()
-    plugins += new execute.IntAluPlugin(executeAt = 0, formatAt = 0)
-    plugins += new execute.BarrelShifterPlugin(shiftAt = 0, formatAt = 0)
-    plugins += new execute.BranchPlugin(aluAt = 0, jumpAt = 1, wbAt = 0)
-    plugins += new execute.lsu.LsuCachelessNoRspStorePlugin(addressAt = 0, forkAt = 0, joinAt = 1, wbAt = 2)
-    // plugins += new execute.lsu.LsuCachelessPlugin(addressAt = 0, forkAt = 0, joinAt = 1, wbAt = 2)
-  }
-}
-
 case class MemoryMapSoc(
     qubitNum: Int,
     withWhitebox: Boolean = false,
@@ -84,11 +41,9 @@ case class MemoryMapSoc(
   val hostCd = ClockDomain(hostClk, hostRst)
   VivadoClkHelper.addInference(hostClk, hostRst, 100000000)
 
-  val pluginsArea = MMSocParams.getPlugins(qubitNum)
-  val plugins = pluginsArea.plugins
-  if (withWhitebox) {
-    plugins += new test.WhiteboxerPlugin()
-  }
+  val params = RiscqParams()
+  params.withTest = withTest
+  val plugins = params.getPlugins().plugins
 
   val hostBusArea = hostCd(HostBusArea(withTest))
   def tlBus = hostBusArea.tlBus
@@ -156,7 +111,7 @@ case class MemoryMapSoc(
   clintFiber.up at SizeMapping(0, 1 << 16) of dBusArb
   clintFiber.up.setUpConnection(a = StreamPipe.FULL, d = StreamPipe.FULL)
 
-  val rfArea = RFArea(qubitNum)
+  val rfArea = RFArea(dacChannels = qubitNum * 2, adcChannels = qubitNum)
   val rfFiber = RFFiber(rfArea)
   rfFiber.up at SizeMapping(MemMapReg.rfBase, 1 << 22) of dBusArb
   rfFiber.up.setUpConnection(a = StreamPipe.FULL, d = StreamPipe.FULL)
@@ -309,11 +264,19 @@ object GenMemMapRegHeader extends App {
   println(MemMapReg.getCHeader())
 }
 
-case class ClintFiber() extends Area {
+case class ClintFiber(externalTime: Option[UInt] = None, hostTime: Option[UInt] = None) extends Area {
   val up = Node.up()
 
-  val time = Reg(UInt(32 bit)) init 0
+  var time: UInt = null
+  if(externalTime.isDefined) {
+    time = externalTime.get
+  } else {
+    time = Reg(UInt(32 bit)) init 0
+    time.addAttribute("MAX_FANOUT", 16)
+    time := time + 1
+  }
   time.simPublic()
+
   val timeCmp = Reg(UInt(32 bit)) init 0
 
   val logic = Fiber build new Area {
@@ -328,10 +291,17 @@ case class ClintFiber() extends Area {
     val factory = new tilelink.SlaveFactory(up.bus, false)
 
     val timeAddr = 0xbff8
-    time.addAttribute("MAX_FANOUT", 16)
-    time := time + U(1)
 
-    factory.readAndWrite(time, timeAddr)
+    if (externalTime.isDefined) {
+      factory.read(time, timeAddr)
+    } else {
+      factory.readAndWrite(time, timeAddr)
+    }
+
+    val hostTimeAddr = 0x4010
+    if (hostTime.isDefined) {
+      factory.read(hostTime.get, hostTimeAddr)
+    }
 
     val timeCmpAddr = 0x4000
     factory.readAndWrite(timeCmp, timeCmpAddr)
@@ -344,60 +314,6 @@ case class ClintFiber() extends Area {
       }
     }
 
-  }
-}
-
-case class RFFiber(rfArea: RFArea) extends Area {
-  import MemMapReg._
-  val up = Node.up()
-
-  val logic = Fiber build new Area {
-    up.m2s.supported load tilelink.SlaveFactory.getSupported(
-      addressWidth = 22,
-      dataWidth = 32,
-      allowBurst = false,
-      proposed = up.m2s.proposed
-    )
-    up.s2m.none()
-
-    val factory = new tilelink.SlaveFactory(up.bus, false)
-
-    val startTimeAddr = 0x0000
-    rfArea.startTime.addAttribute("MAX_FANOUT", 16)
-    factory.write(rfArea.startTime, startTimeAddr)
-
-    val pgFactory = factory
-    val rdFactory = factory
-    val dcgFactory = factory
-
-    val pgs = rfArea.pgs
-    for ((pg, id) <- pgs.zipWithIndex) {
-      pgFactory.driveFlow(getDriveReg(pg.io.addr), pgTlOffset + pgAddrOffset(id), bitOffset = 16)
-      pgFactory.driveFlow(getDriveReg(pg.io.amp), pgTlOffset + pgAmpOffset(id), bitOffset = 16)
-      pgFactory.driveFlow(getDriveReg(pg.io.dur), pgTlOffset + pgDurOffset(id), bitOffset = 16)
-      pgFactory.driveFlow(getDriveReg(pg.io.freq), pgTlOffset + pgFreqOffset(id), bitOffset = 16)
-      pgFactory.driveFlow(getDriveReg(pg.io.phase), pgTlOffset + pgPhaseOffset(id), bitOffset = 16)
-    }
-
-    val dcgs = rfArea.dcgs
-    for ((dcg, id) <- dcgs.zipWithIndex) yield new Area {
-      dcgFactory.driveFlow(getDriveReg(dcg.io.freq), dcgTlOffset + dcgFreqOffset(id), bitOffset = 16)
-      dcgFactory.driveFlow(getDriveReg(dcg.io.phase), dcgTlOffset + dcgPhaseOffset(id), bitOffset = 16)
-    }
-
-    val rds = rfArea.rds
-    for ((rd, id) <- rds.zipWithIndex) {
-      rdFactory.driveFlow(getDriveReg(rd.io.dur), rdTlOffset + rdDurOffset(id), bitOffset = 16)
-
-      rdFactory.read(rd.io.res.payload, rdTlOffset + rdResOffset(id))
-      rdFactory.read(rd.io.real, rdTlOffset + rdRealOffset(id))
-      rdFactory.read(rd.io.imag, rdTlOffset + rdImagOffset(id))
-      rdFactory.onReadPrimitive(SingleMapping(rdTlOffset + rdResOffset(id)), haltSensitive = false, null) {
-        when(!rd.io.res.valid) {
-          rdFactory.writeHalt() // and readHalt
-        }
-      }
-    }
   }
 }
 

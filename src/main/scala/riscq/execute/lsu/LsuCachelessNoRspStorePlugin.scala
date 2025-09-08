@@ -114,7 +114,7 @@ class LsuCachelessNoRspStorePlugin(
     val onAddress = new addressCtrl.Area {
       val RAW_ADDRESS = insert(srcp.ADD_SUB.asUInt)
 
-      val MISS_ALIGNED = insert((1 to log2Up(LSLEN / 8)).map(i => SIZE === i && RAW_ADDRESS(i - 1 downto 0) =/= 0).orR)
+      // val MISS_ALIGNED = insert((1 to log2Up(LSLEN / 8)).map(i => SIZE === i && RAW_ADDRESS(i - 1 downto 0) =/= 0).orR)
     }
 
     val cmdInflights = Bool()
@@ -146,9 +146,9 @@ class LsuCachelessNoRspStorePlugin(
       val freezeIt = bus.cmd.isStall
       haltWhen(freezeIt)
 
-      when(onAddress.MISS_ALIGNED) {
-        skip := True
-      }
+      // when(onAddress.MISS_ALIGNED) {
+      //   skip := True
+      // }
 
       WITH_RSP := (bus.cmd.valid || cmdSent) && noStore
     }

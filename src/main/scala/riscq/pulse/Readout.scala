@@ -12,6 +12,20 @@ import spinal.lib.eda.bench.Rtl
 import riscq.misc.XilinxRfsocTarget
 import spinal.lib.eda.bench.Bench
 
+object AddTree {
+  def apply(inputs: Seq[SInt]): AddTree = {
+    val batchSize = inputs.length
+    val inWidth = inputs.head.getWidth
+    val outWidth = inWidth
+    val addTree = AddTree(batchSize, inWidth, outWidth)
+    addTree.addAttribute("DONT_TOUCH", "TRUE")
+    for(i <- 0 until batchSize) {
+      addTree.input(i) := inputs(i)
+    }
+    addTree
+  }
+}
+
 case class AddTree(batchSize: Int, inWidth: Int, outWidth: Int) extends Component {
   val input = in port Vec.fill(batchSize)(SInt(inWidth bit))
   val sum = out port SInt(outWidth bit)

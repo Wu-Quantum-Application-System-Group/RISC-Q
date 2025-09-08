@@ -42,7 +42,7 @@ object Axi4VivadoHelper {
     axi.w.data.addAttribute("X_INTERFACE_INFO", "xilinx.com:interface:aximm:1.0 " + ifcName +" WDATA")
     axi.w.strb.addAttribute("X_INTERFACE_INFO", "xilinx.com:interface:aximm:1.0 " + ifcName +" WSTRB")
     axi.w.last.addAttribute("X_INTERFACE_INFO", "xilinx.com:interface:aximm:1.0 " + ifcName +" WLAST")
-    // axi.w.id.addAttribute("X_INTERFACE_INFO", "xilinx.com:interface:aximm:1.0 " + ifcName +" WID")
+    Option(axi.w.id).foreach(_.addAttribute("X_INTERFACE_INFO", "xilinx.com:interface:aximm:1.0 " + ifcName +" WID"))
     // axi.w.user.addAttribute("X_INTERFACE_INFO", "xilinx.com:interface:aximm:1.0 " + ifcName +" WUSER")
     axi.b.valid.addAttribute("X_INTERFACE_INFO", "xilinx.com:interface:aximm:1.0 " + ifcName +" BVALID")
     axi.b.ready.addAttribute("X_INTERFACE_INFO", "xilinx.com:interface:aximm:1.0 " + ifcName +" BREADY")

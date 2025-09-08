@@ -1,5 +1,5 @@
 CC=clang
-CFLAGS=-march=rv32i -nostdlib -O3
+CFLAGS=-march=rv32i -nostdlib -O1
 
 # Get all .c files
 SRCS := $(wildcard src/*.c)

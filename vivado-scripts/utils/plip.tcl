@@ -1,5 +1,7 @@
+# ipx::package_project -root_dir ${BUILD_PREFIX}/ip -vendor user.org -library user -taxonomy /UserIP -import_files -set_current false -force -quiet
+# ipx::unload_core ${BUILD_PREFIX}/ip/component.xml
+# ipx::open_ipxact_file ${BUILD_PREFIX}/ip/component.xml
 ipx::package_project -root_dir ${BUILD_PREFIX}/ip -vendor user.org -library user -taxonomy /UserIP -import_files -set_current false -force -quiet
-ipx::unload_core ${BUILD_PREFIX}/ip/component.xml
 ipx::open_ipxact_file ${BUILD_PREFIX}/ip/component.xml
 
 ipx::add_bus_parameter FREQ_HZ [ipx::get_bus_interfaces hostClk -of_objects [ipx::current_core]]
@@ -10,7 +12,7 @@ set_property value {500000000} [ipx::get_bus_parameters FREQ_HZ -of_objects [ipx
 ipx::associate_bus_interfaces -busif S_AXIS -clock hostClk [ipx::current_core]
 ipx::associate_bus_interfaces -busif S_AXIS -clock dspClk -remove [ipx::current_core]
 
-for {set i 0} {$i < 4} {incr i} {
+for {set i 0} {$i < 16} {incr i} {
     ipx::associate_bus_interfaces -busif DAC${i}_AXIS -clock dspClk [ipx::current_core]
     ipx::associate_bus_interfaces -busif DAC${i}_AXIS -clock hostClk -remove [ipx::current_core]
     ipx::associate_bus_interfaces -busif ADC${i}_AXIS -clock dspClk [ipx::current_core] 

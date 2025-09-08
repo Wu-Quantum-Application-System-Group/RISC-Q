@@ -2,6 +2,7 @@ package riscq.scratch
 
 import spinal.core._
 import spinal.lib._
+import spinal.lib.bus.misc.SizeMapping
 import spinal.lib.eda.bench.Rtl
 import spinal.lib.eda.bench.Bench
 import riscq.misc.XilinxRfsocTarget
@@ -9,6 +10,8 @@ import riscq.memory.DualClockRam
 import riscq.memory.DualClockRamTest
 import riscq.pulse.TimedFifo
 import riscq.pulse.PulseGenerator
+import spinal.lib.bus.tilelink
+import riscq.soc.MemMapDriverFiber
 
 object ManyRegs extends App {
   case class ManyRegs(n: Int) extends Component {
@@ -287,6 +290,53 @@ object BenchPulseGenerator extends App {
   val timeWidth = 32
   val rtl= Rtl(SpinalVerilog(
     PulseGenerator(batchSize, dataWidth, addrWidth, timeWidth, fifoDepth = 4, fifoNum = 2)
+  ))
+  Bench(List(rtl), XilinxRfsocTarget(1000 MHz), "./bench/")
+}
+
+object BenchMemInfer extends App {
+  case class MemInfer() extends Component {
+    val mem = Mem.fill(256)(Bits(128 bits))
+    val port0 = slave port mem.readWriteSyncPort()
+    val port1 = slave port mem.readWriteSyncPort()
+  }
+  SpinalVerilog(MemInfer())
+  val rtl = Rtl(SpinalVerilog(
+    MemInfer()
+    ))
+  Bench(List(rtl), XilinxRfsocTarget(1000 MHz), "./bench/")
+}
+
+object ParamTable extends App {
+  case class ParamTable() extends Component {
+    val p = tilelink.M2sParameters(
+      support = tilelink.M2sSupport(
+        addressWidth = 8,
+        dataWidth = 32,
+        transfers = tilelink.M2sTransfers(
+          get = tilelink.SizeRange.upTo(4),
+          putFull = tilelink.SizeRange.upTo(4),
+          putPartial = tilelink.SizeRange.upTo(4)
+        )
+      ),
+      sourceCount = 2
+    )
+    val tl = new tilelink.fabric.MasterBus(p)
+
+    val params = Vec.fill(16)(Vec.fill(5)(Reg(Bits(16 bits))))
+
+    val driver = MemMapDriverFiber{factory =>
+        for(i <- 0 until 16) {
+          for(j <- 0 until 5) {
+            factory.readAndWrite(params(i)(j), (i * 5 + j) * 4)
+          }
+        }
+      }
+    driver.up.setUpConnection(a = StreamPipe.FULL, d = StreamPipe.FULL)
+    driver.up at SizeMapping(0, 1024) of tl.node
+  }
+  val rtl = Rtl(SpinalVerilog(
+    ParamTable()
   ))
   Bench(List(rtl), XilinxRfsocTarget(1000 MHz), "./bench/")
 }

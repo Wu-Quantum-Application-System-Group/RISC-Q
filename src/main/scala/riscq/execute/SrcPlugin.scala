@@ -95,7 +95,6 @@ class SrcPlugin(var executeAt : Int,
     def has(keys : SrcKeys*) = keys.exists(keys.contains)
 
     for((impl, keys) <- spec){
-      val REVERT, ZERO = Payload(Bool())
       val decodes = keys.toSeq.flatMap{
           case sk.Op.SRC1     => List(ss.REVERT -> False, ss.ZERO   -> True)
           case sk.Op.ADD      => List(ss.REVERT -> False, ss.ZERO   -> False)

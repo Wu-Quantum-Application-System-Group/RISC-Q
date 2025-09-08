@@ -46,7 +46,7 @@ object TileLinkCdDemo extends App {
 
 object TileLinkSizeMappingDemo extends App {
   case class TLSM() extends Component {
-    val m1 =  new MasterBus(
+    val m1 = new MasterBus(
       tilelink.M2sParameters(
         addressWidth = 32,
         dataWidth = 32,
@@ -76,7 +76,7 @@ object TileLinkSizeMappingDemo extends App {
     memFiber2.up at 0x00000200 of m1.node
   }
 
-  SimConfig.compile{TLSM()}.doSim{ dut => 
+  SimConfig.compile { TLSM() }.doSim { dut =>
     implicit val idAllocator = new tilelink.sim.IdAllocator(DebugId.width)
     implicit val idCallback = new tilelink.sim.IdCallback
     val cd = dut.clockDomain
@@ -85,12 +85,12 @@ object TileLinkSizeMappingDemo extends App {
     val monitor1 = new tilelink.sim.Monitor(dut.memFiber1.up.bus, cd)
     val monitor2 = new tilelink.sim.Monitor(dut.memFiber2.up.bus, cd)
     monitor1.add(new tilelink.sim.MonitorSubscriber {
-      override def onA(a: TransactionA) = {println(s"a1:${simTime()}"); println(a)}
-      override def onD(d: TransactionD) = {println(s"d1:${simTime()}");println(d)}
+      override def onA(a: TransactionA) = { println(s"a1:${simTime()}"); println(a) }
+      override def onD(d: TransactionD) = { println(s"d1:${simTime()}"); println(d) }
     })
     monitor2.add(new MonitorSubscriber {
-      override def onA(a: TransactionA) = {println(s"a2:${simTime()}"); println(a)}
-      override def onD(d: TransactionD) = {println(s"d2:${simTime()}");println(d)}
+      override def onA(a: TransactionA) = { println(s"a2:${simTime()}"); println(a) }
+      override def onD(d: TransactionD) = { println(s"d2:${simTime()}"); println(d) }
     })
 
     tlDriver.putFullData(0, 512, List(0.toByte))
@@ -146,10 +146,10 @@ object TileLinkDemo extends App {
       up.s2m.none()
     }
   }
-  SpinalVerilog{
+  SpinalVerilog {
     new Component {
-      val myClk = in Bool()
-      val myRst = in Bool()
+      val myClk = in Bool ()
+      val myRst = in Bool ()
       val myCd = ClockDomain(myClk, myRst)
       val master = myCd(MasterFiber())
       val slave = SlaveFiber()
@@ -164,7 +164,7 @@ object TileLinkDemo extends App {
 object RetainerDemo extends App {
   case class TopLevel(plugins: Seq[FiberPlugin]) extends Component {
     val host = new PluginHost
-      host.asHostOf(plugins)
+    host.asHostOf(plugins)
   }
 
   case class PA() extends FiberPlugin {
@@ -195,10 +195,39 @@ object RetainerDemo extends App {
     }
   }
 
-  SpinalVerilog{
+  SpinalVerilog {
     // val plugins = List(PA(), PB())
     val plugins = List(PA(), PB(), PC())
     TopLevel(plugins)
   }
 
+}
+
+object TestTileLinkParameters extends App {
+  SpinalVerilog {
+    new Component {
+      val tlM2sParameter = tilelink.M2sParameters(
+        addressWidth = 32,
+        dataWidth = 32,
+        masters = List(
+          tilelink.M2sAgent(
+            name = this,
+            mapping = List(
+              tilelink.M2sSource(
+                id = SizeMapping(0, 4),
+                emits = tilelink.M2sTransfers(
+                  get = tilelink.SizeRange.upTo(0x4),
+                  putFull = tilelink.SizeRange.upTo(0x4),
+                  putPartial = tilelink.SizeRange.upTo(0x4)
+                )
+              )
+            )
+          )
+        )
+      )
+      println(s"${tilelink.SizeRange.upTo(0x100).max}")
+      val param = NodeParameters(tlM2sParameter, tilelink.S2mParameters.none()).toBusParameter()
+      println(param)
+    }
+  }
 }

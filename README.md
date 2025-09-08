@@ -27,14 +27,13 @@ A signal $E(t - t_0)A\cos(\omega t + \phi)$ that drives the measurement is send 
 
 To generate and synthesize the Verilog code of an SoC
 ```
-mill runMain riscq.soc.GenMMSocVivado
-cd build
-../vivado-scripts/gen-bit.sh project-name
+mill runMain riscq.soc.GenMultiCoreSoc
+./vivado-scripts/gen-project.sh MultiCoreSoc
 ```
 
 ## Testbench
 
-Basic testbenches are available in `src/main/scala/riscq/tester/MMSocTestBench.scala`.
+Basic testbenches are available in `src/main/scala/riscq/tester/MMSocTestBench.scala` and `src/main/scala/riscq/tester/MultiCoreSocTechBench.scala`.
 
 ## Programming
 

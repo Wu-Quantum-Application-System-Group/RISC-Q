@@ -3,6 +3,30 @@ package riscq.misc
 import spinal.core._
 import spinal.lib._
 
+case class IBUFDS_GTE4() extends BlackBox {
+  val I = in Bool()
+  val IB = in Bool()
+  val CEB = in Bool()
+  val O = out Bool()
+  val ODIV2 = out Bool()
+}
+// IBUFDS_GTE4 #(
+//     .REFCLK_EN_TX_PATH  (1'b0),
+//     .REFCLK_HROW_CK_SEL (2'b00),
+//     .REFCLK_ICNTL_RX    (2'b00)
+//   ) IBUFDS_GTE4_MGTREFCLK0_X0Y1_INST (
+//     .I     (mgtrefclk0_x0y1_p),
+//     .IB    (mgtrefclk0_x0y1_n),
+//     .CEB   (1'b0),
+//     .O     (mgtrefclk0_x0y1_int),
+//     .ODIV2 ()
+//   );
+
+case class BUFG() extends BlackBox {
+  val I = in Bool()
+  val O = out Bool()
+}
+
 case class IBUFGDS() extends BlackBox {
   val I = in Bool()
   val IB = in Bool()

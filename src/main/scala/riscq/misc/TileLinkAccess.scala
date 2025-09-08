@@ -4,6 +4,7 @@ import spinal.core._
 import spinal.core.sim._
 import spinal.core.fiber._
 import spinal.lib._
+import spinal.lib.misc.pipeline
 import spinal.lib.bus.tilelink
 import spinal.lib.bus.tilelink._
 import spinal.lib.bus.tilelink.coherent.OrderingCmd
@@ -12,105 +13,164 @@ import spinal.lib.bus.tilelink.fabric.Node
 import spinal.lib.pipeline._
 import spinal.lib.io.TriStateArray
 import scala.math
+import scala.collection.mutable.ArrayBuffer
 
-class TileLinkMemReadWriteLogic[T <: Data](p : BusParameter, port: MemReadWritePort[T], withOutReg: Boolean) extends Area {
-  val io = new Area{
-    val up = Bus(p)
+case class TileLinkMemWriteLogic[T <: Data](p: BusParameter, memPort: Flow[MemWriteCmd[T]])
+    extends Component {
+  assert(p.beatMax == 1, f"beatMax must be 1, but got ${p.beatMax}")
+  assert(p.dataWidth <= memPort.dataType.getBitsWidth, f"dataWidth must be less than or equal to ${memPort.dataType.getBitsWidth}, but got ${p.dataWidth}")
+  val io = new Area {
+    val up = slave port Bus(p)
+    val port = out port cloneOf(memPort)
   }
-  val dataBytes = math.ceil(port.dataType.getBitsWidth / 8.0).toInt
-  val addressWidth = port.address.getBitsWidth + log2Up(dataBytes)
+  val inDataBytes = p.dataBytes
+  val outDataBytes = math.ceil(io.port.dataType.getBitsWidth / 8.0).toInt
+  assert(isPow2(outDataBytes), f"outDataBytes must be a power of 2, but got ${outDataBytes}")
 
-  val pipeline = new Pipeline{
-    val cmd = new Stage{
-      val IS_GET = insert(Opcode.A.isGet(io.up.a.opcode))
-      val SIZE = insert(io.up.a.size)
-      val SOURCE = insert(io.up.a.source)
-      val LAST = insert(True)
+  val addrRange = log2Up(outDataBytes) - 1 downto log2Up(inDataBytes)
 
-      valid := io.up.a.valid
-      io.up.a.ready := isReady
+  val ratio = outDataBytes / inDataBytes
+  
+  // println(s"ratio: ${ratio}, io.port.mask: ${io.port.mask.getBitsWidth}, io.up.a.mask: ${io.up.a.mask.getBitsWidth}")
+  val mask = Vec.fill(ratio)(cloneOf(io.up.a.mask))
+  val sel = io.up.a.address(addrRange)
+  mask.foreach(_ := 0)
+  mask(sel) := io.up.a.mask
+  val addressShifted = (io.up.a.address >> log2Up(outDataBytes))
+  io.port.valid := io.up.a.valid
+  io.port.data.assignFromBits(io.up.a.data #* ratio)
+  io.port.mask := Cat(mask)
+  io.port.address := addressShifted
 
-      val addressShifted = (io.up.a.address >> log2Up(p.dataBytes))
-      port.enable := isFireing
-      port.write := !IS_GET
-      if(p.withDataA) {
-        port.wdata.assignFromBits(io.up.a.data)
-        port.mask := io.up.a.mask
-      }
+  val rsp = cloneOf(io.up.d)
+  io.up.a.ready := rsp.ready
+  rsp.valid := io.up.a.valid
+  rsp.opcode := Opcode.D.ACCESS_ACK
+  rsp.param := 0
+  rsp.source := io.up.a.source
+  rsp.size := io.up.a.size
+  rsp.denied := False
+  // rsp.corrupt := False
 
-      val withFsm = io.up.p.beatMax != 1
-      if (!withFsm) port.address := addressShifted
-      val fsm = withFsm generate new Area {
-        val counter = Reg(io.up.p.beat) init (0)
-        val address = Reg(cloneOf(port.address))
-        val size = Reg(io.up.p.size)
-        val source = Reg(io.up.p.source)
-        val isGet = Reg(Bool())
-        val busy = counter =/= 0
-        when(busy && isGet) {
-          io.up.a.ready := False
-          valid := True
-        }
+  io.up.d << rsp.stage()
+}
 
-        when(io.up.a.fire && !busy){
-          size := io.up.a.size
-          source := io.up.a.source
-          isGet := Opcode.A.isGet(io.up.a.opcode)
-          address := addressShifted
-        }
+case class TileLinkMemWriteFiber[T <: Data](port: Flow[MemWriteCmd[T]]) extends Area {
+  val up = Node.up()
 
-        LAST clearWhen(counter =/= sizeToBeatMinusOne(io.up.p,SIZE))
-        when(busy){
-          SIZE := size
-          SOURCE := source
-          IS_GET := isGet
-        }
-        when(isFireing) {
-          counter := counter + 1
-          when(LAST) {
-            counter := 0
-          }
-        }
-        port.address := busy.mux(address, addressShifted) | counter.resized
-      }
+  val dataBytes = math.pow(2, log2Up(port.dataType.getBitsWidth / 8)).toInt
+  val thread = Fiber build new Area {
+    // up.forceDataWidth(dataBytes * 8)
+    // up.m2s.supported load up.m2s.proposed.intersect(M2sTransfers.allGetPut).copy(addressWidth = port.addressWidth + log2Up(dataBytes), dataWidth = dataBytes * 8)
+    val proposedBytes = up.m2s.proposed.dataWidth / 8
+    assert(up.m2s.proposed.dataWidth <= port.dataType.getBitsWidth, f"dataWidth must be less than or equal to ${port.dataType.getBitsWidth}, but got ${up.m2s.proposed.dataWidth}")
+    up.m2s.supported load up.m2s.proposed
+      .intersect(
+        tilelink.M2sTransfers(
+          putFull = tilelink.SizeRange.upTo(proposedBytes),
+          putPartial = tilelink.SizeRange.upTo(proposedBytes)
+        )
+      )
+      .copy(addressWidth = port.addressWidth + log2Up(dataBytes))
+    up.s2m.none()
 
+    val logic = TileLinkMemWriteLogic(up.bus.p, port)
+    logic.io.port >> port
+    logic.io.up << up.bus
+
+    up.bus.get.simPublic
+  }
+}
+
+case class TileLinkMemReadWriteLogic[T <: Data](p: BusParameter, inPort: MemReadWritePort[T], withOutReg: Boolean)
+    extends Component {
+  assert(p.beatMax == 1, "beatMax must be 1")
+  val io = new Area {
+    val up = slave port Bus(p)
+    val port = master port cloneOf(inPort)
+  }
+  val dataBytes = math.ceil(io.port.dataType.getBitsWidth / 8.0).toInt
+  val addressWidth = io.port.address.getBitsWidth + log2Up(dataBytes)
+
+  val cmd = pipeline.Node()
+  val rsp = pipeline.CtrlLink()
+  val cmdLogic = new cmd.Area {
+    val IS_GET = insert(Opcode.A.isGet(io.up.a.opcode))
+    val SIZE = insert(io.up.a.size)
+    val SOURCE = insert(io.up.a.source)
+    val LAST = insert(True)
+
+    valid := io.up.a.valid
+    io.up.a.ready := isReady
+
+    val addressShifted = (io.up.a.address >> log2Up(p.dataBytes))
+    io.port.enable := isFiring
+    io.port.write := !IS_GET
+    if (p.withDataA) {
+      io.port.wdata.assignFromBits(io.up.a.data)
+      io.port.mask := io.up.a.mask
     }
 
-
-    val buf = withOutReg generate new Stage(Connection.M2S())
-
-    val rsp = new Stage(Connection.M2S()){
-      val takeIt = cmd.LAST || cmd.IS_GET
-      haltWhen(!io.up.d.ready && takeIt)
-      io.up.d.valid := valid && takeIt
-      io.up.d.opcode := cmd.IS_GET.mux(Opcode.D.ACCESS_ACK_DATA, Opcode.D.ACCESS_ACK)
-      io.up.d.param := 0
-      io.up.d.source := cmd.SOURCE
-      io.up.d.size := cmd.SIZE
-      io.up.d.denied := False
-      io.up.d.corrupt := False
-      io.up.d.data := port.rdata.asBits
+    val readBuffer = Vec.fill(4)(Reg(io.port.rdata))
+    val readBufferId = Reg(UInt(2 bits))
+    val readPortValid = Vec.tabulate(4)(i => Delay(readBufferId === i, 1 + withOutReg.toInt))
+    readBuffer(Delay(readBufferId, 1 + withOutReg.toInt)) := io.port.rdata
+    when(isFiring) {
+      readBufferId := readBufferId + 1
     }
-    build()
+    val RDATA_ID = insert(readBufferId)
+    io.port.address := addressShifted
+  }
+  val rspLogic = new rsp.Area {
+    val takeIt = cmdLogic.LAST || cmdLogic.IS_GET
+    duplicateWhen(!io.up.d.ready && takeIt)
+    io.up.d.valid := isValid && takeIt
+    io.up.d.opcode := cmdLogic.IS_GET.mux(Opcode.D.ACCESS_ACK_DATA, Opcode.D.ACCESS_ACK)
+    io.up.d.param := 0
+    io.up.d.source := cmdLogic.SOURCE
+    io.up.d.size := cmdLogic.SIZE
+    io.up.d.denied := False
+    io.up.d.corrupt := False
+    val readPortValid = cmdLogic.readPortValid(cmdLogic.RDATA_ID)
+    val bufferData = cmdLogic.readBuffer(cmdLogic.RDATA_ID)
+    val rData = readPortValid.mux(io.port.rdata, bufferData)
+    io.up.d.data := rData.asBits
   }
 
-  // val ordering = Flow(OrderingCmd(p.sizeBytes))
-  // ordering.valid := io.up.a.fire && io.up.a.isLast()
-  // ordering.debugId := io.up.a.debugId
-  // ordering.bytes := (U(1) << io.up.a.size).resized
-  // Component.current.addTag(new OrderingTag(ordering.stage()))
+  val links = ArrayBuffer[pipeline.Link](rsp)
+  val skidBuffer = pipeline.Node()
+  if (withOutReg) {
+    val read = pipeline.Node()
+    links += pipeline.StageLink(cmd, read)
+    links += pipeline.S2MLink(read, skidBuffer)
+    links += pipeline.StageLink(skidBuffer, rsp.up)
+  } else {
+    links += pipeline.S2MLink(cmd, skidBuffer)
+    links += pipeline.StageLink(skidBuffer, rsp.up)
+  }
+  pipeline.Builder(links)
 }
 
 case class TileLinkMemReadWriteFiber[T <: Data](port: MemReadWritePort[T], withOutReg: Boolean) extends Area {
   val up = Node.up()
 
   val dataBytes = math.pow(2, log2Up(port.dataType.getBitsWidth / 8)).toInt
-  val thread = Fiber build new Area{
+  val thread = Fiber build new Area {
     up.forceDataWidth(dataBytes * 8)
-    up.m2s.supported load up.m2s.proposed.intersect(M2sTransfers.allGetPut).copy(addressWidth = port.addressWidth + log2Up(dataBytes), dataWidth = dataBytes * 8)
+    // up.m2s.supported load up.m2s.proposed.intersect(M2sTransfers.allGetPut).copy(addressWidth = port.addressWidth + log2Up(dataBytes), dataWidth = dataBytes * 8)
+    up.m2s.supported load up.m2s.proposed
+      .intersect(
+        tilelink.M2sTransfers(
+          get = tilelink.SizeRange(dataBytes),
+          putFull = tilelink.SizeRange(dataBytes),
+          putPartial = tilelink.SizeRange(dataBytes)
+        )
+      )
+      .copy(addressWidth = port.addressWidth + log2Up(dataBytes), dataWidth = dataBytes * 8)
     up.s2m.none()
 
-    val logic = new TileLinkMemReadWriteLogic(up.bus.p, port, withOutReg)
+    val logic = TileLinkMemReadWriteLogic(up.bus.p, port, withOutReg)
+    logic.io.port <> port
     logic.io.up << up.bus
 
     up.bus.get.simPublic
@@ -120,7 +180,7 @@ case class TileLinkMemReadWriteFiber[T <: Data](port: MemReadWritePort[T], withO
 case class TileLinkDriveFiber[T <: Data](port: T, default: T = null) {
   val up = tilelink.fabric.Node.up()
   val dataWidth = BigInt(2).pow(log2Up(port.getBitsWidth)).toInt max 16
-  val addressWidth = log2Up(dataWidth/8)
+  val addressWidth = log2Up(dataWidth / 8)
   println(s"datawidth${dataWidth}")
   val fiber = Fiber build new Area {
     up.m2s.supported load M2sSupport(
@@ -135,7 +195,7 @@ case class TileLinkDriveFiber[T <: Data](port: T, default: T = null) {
     up.s2m.none()
     val factory = new SlaveFactory(up.bus, allowBurst = false)
     val writeReg = factory.drive(port, 0)
-    if(default != null) {
+    if (default != null) {
       writeReg init (default)
     }
     Fiber.awaitCheck()
@@ -178,12 +238,12 @@ case class GpioFiber(width: Int = 32) extends Area {
     // val writeEnableReg = factory.drive(pins.writeEnable, 0x0) init (0)
     // val writeReg = factory.drive(pins.write, width / 8) init(0)
     // factory.read(pins.read, width / 8 * 2)
-    val writeReg = factory.drive(pins, 0) init(0)
+    val writeReg = factory.drive(pins, 0) init (0)
   }
 }
 
 case class TileLinkFifo(busParameter: BusParameter, depth: Int = 2) extends Component {
-  val io = new Bundle{
+  val io = new Bundle {
     val input = slave(Bus(busParameter))
     val output = master(Bus(busParameter))
   }
@@ -198,11 +258,11 @@ case class TileLinkFifo(busParameter: BusParameter, depth: Int = 2) extends Comp
   io.input.d << d.io.pop
   val e = busParameter.withBCE generate StreamFifo(ChannelE(busParameter), depth)
 
-  if(busParameter.withBCE) {
+  if (busParameter.withBCE) {
     b.io.push << io.output.b
     io.input.b << b.io.pop
     c.io.push << io.input.c
-    io.output.c << c.io.pop    
+    io.output.c << c.io.pop
     e.io.push << io.input.e
     io.output.e << e.io.pop
   }
@@ -212,7 +272,7 @@ case class TileLinkFifoFiber(depth: Int = 2) extends Area {
   val up = Node.slave()
   val down = Node.master()
 
-  val logic = Fiber build new Area{
+  val logic = Fiber build new Area {
     down.m2s.proposed.load(up.m2s.proposed)
     up.m2s.supported load down.m2s.supported
     down.m2s.parameters load up.m2s.parameters
@@ -229,7 +289,7 @@ case class TileLinkPipeFiber(pipe: StreamPipe) extends Area {
   val up = Node.slave()
   val down = Node.master()
 
-  val logic = Fiber build new Area{
+  val logic = Fiber build new Area {
     down.m2s.proposed.load(up.m2s.proposed)
     up.m2s.supported load down.m2s.supported
     down.m2s.parameters load up.m2s.parameters

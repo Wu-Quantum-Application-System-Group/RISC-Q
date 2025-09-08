@@ -28,6 +28,83 @@ import spinal.core.fiber.Fiber
 import riscq.fetch.CachelessBusToTilelink
 import riscq.misc.Axi4VivadoHelper
 import riscq.memory.DualClockRam
+import riscq.network.GtPins
+import riscq.misc.VivadoClkHelper
+import riscq.network.AxiToTileLinkDriver
+import spinal.lib.bus.amba4.axi.sim.Axi4Master
+
+case class DacSquare() extends Component {
+  val dacNum = 16
+  val adcNum = 16
+  val io = new Bundle {
+    val dspClk = in Bool ()
+    val dspExtRst = in Bool ()
+    val axi = slave(Axi4(Axi4Config(32, 32, 2)))
+    val dac = List.fill(dacNum)(master port Stream(Bits(16 * 16 bits)))
+    val adc = List.fill(adcNum)(slave port Stream(Bits(4 * 16 bits)))
+  }
+  riscq.misc.Axi4VivadoHelper.addInference(io.axi, "S_AXIS")
+  io.adc.zipWithIndex.foreach { case (d, id) =>
+    riscq.misc.Axi4StreamVivadoHelper.addStreamInference(d, s"ADC${id}_AXIS")
+    d.ready := True
+  }
+  io.dac.zipWithIndex.foreach { case (d, id) =>
+    riscq.misc.Axi4StreamVivadoHelper.addStreamInference(d, s"DAC${id}_AXIS")
+  }
+
+  val hostCd = ClockDomain.current
+  hostCd.renamePulledWires("hostClk", "hostRst")
+  VivadoClkHelper.addInference(hostCd.readClockWire, hostCd.readResetWire, 100000000)
+
+  // cd500m
+  io.dspClk.setName("dspClk")
+  io.dspExtRst.setName("dspExtRst")
+  val dspRst = io.dspExtRst
+
+  val dspCd = ClockDomain(io.dspClk, dspRst)
+  VivadoClkHelper.addInference(dspCd.readClockWire, io.dspExtRst, 500000000)
+
+  val sqGen = dspCd(SquareGenerator(4))
+  val enable = Reg(Bool())
+  val enableBuffered = dspCd(BufferCC(enable))
+  val dacSel = Reg(UInt(4 bits)) init 0
+
+  val axiDriver = AxiToTileLinkDriver(driveProc = factory => {
+    factory.drive(enable, 0)
+    factory.write(dacSel, 4)
+  })
+  axiDriver.axi <> io.axi
+
+  for (i <- 0 until dacNum) {
+    io.dac(i).valid := True
+    val selected = dspCd(BufferCC(dacSel === i))
+    val valid = dspCd(RegNext(selected && enableBuffered))
+    io.dac(i).payload := valid.mux(sqGen.io.data.asBits, B(0, 256 bits))
+  }
+}
+
+object GenDacSquare extends App {
+  SpinalConfig(
+    mode = Verilog,
+    targetDirectory = "./build/rtl",
+    romReuse = true
+  ).generate(DacSquare())
+}
+
+object TestDacSquare extends App {
+  SimConfig.compile{
+    val dut = DacSquare()
+    dut
+  }.doSim{ dut =>
+    val dspCd = dut.clockDomain
+    val hostCd = dut.hostCd
+    val axi4Driver = Axi4Master(dut.io.axi, hostCd)
+    axi4Driver.reset()
+    dspCd.forkStimulus(10)
+    hostCd.forkStimulus(50)
+  }
+}
+
 
 case class PulseReader(addrWidth: Int) extends Component {
   val io = new Bundle {
@@ -147,8 +224,7 @@ case class SquareGenerator(timerWidth: Int) extends Component {
   val amp = S(1 << 14, 16 bits)
   val namp = S(-(1 << 14), 16 bits)
 
-  io.data.tail.foreach { _ := timer.msb.mux(amp, namp) }
-  io.data(0) := S(0)
+  io.data.foreach { _ := timer.msb.mux(amp, namp) }
 }
 
 case class SquareGeneratorHighFreq() extends Component {
@@ -190,88 +266,6 @@ object SquareTest extends App {
         cd.waitSampling()
       }
     }
-}
-
-case class DacSquare() extends Component {
-  val addrWidth = 8
-
-  ClockDomain.current.renamePulledWires("clk500m", "rst500m")
-  ClockDomain.current.readResetWire.addAttribute("X_INTERFACE_INFO", "xilinx.com:signal:reset:1.0 rst500m rst")
-  ClockDomain.current.readResetWire.addAttribute("X_INTERFACE_PARAMETERS", "POLARITY ACTIVE_HIGH")
-  ClockDomain.current.readClockWire.addAttribute("X_INTERFACE_INFO", "xilinx.com:signal:clock:1.0 clk500m clk")
-  ClockDomain.current.readClockWire.addAttribute(
-    "X_INTERFACE_PARAMETERS",
-    "FREQ_HZ 500000000, ASSOCIATED_BUSIF DAC0_AXIS:DAC1_AXIS:DAC2_AXIS:DAC3_AXIS:ADC0_AXIS:ADC1_AXIS:ADC2_AXIS:ADC3_AXIS, ASSOCIATED_RESET rst500m"
-  )
-
-  // cd100m
-  val clk100m = in Bool ()
-  val rst100m = in Bool ()
-  val cd100m = ClockDomain(clk100m, rst100m)
-  rst100m.addAttribute("X_INTERFACE_INFO", "xilinx.com:signal:reset:1.0 rst100m rst")
-  rst100m.addAttribute("X_INTERFACE_PARAMETERS", "POLARITY ACTIVE_HIGH")
-  clk100m.addAttribute("X_INTERFACE_INFO", "xilinx.com:signal:clock:1.0 clk100m clk")
-  clk100m.addAttribute("X_INTERFACE_PARAMETERS", "FREQ_HZ 100000000, ASSOCIATED_BUSIF S_AXIS, ASSOCIATED_RESET rst100m")
-
-  val axiConfig = Axi4Config(
-    addressWidth = 32,
-    dataWidth = 32,
-    idWidth = 2
-  )
-  val axi = cd100m(slave(Axi4(axiConfig)))
-
-  // val pulseMem = PulseMem(dataBits = 256, bufferDepth = 1 << addrWidth, cd100m)
-
-  val cd100mLogic = new ClockingArea(cd100m) {
-    val shareBus = Node()
-    val bridge = new Axi4ToTilelinkFiber(32, 4)
-    bridge.up load axi
-    shareBus at 0 of bridge.down
-    Axi4VivadoHelper.addInference(axi, "S_AXIS")
-
-    val dummyGpio = GpioFiber()
-    dummyGpio.up at 0 of shareBus
-    // val pulseMemWa = WidthAdapter()
-    // pulseMemWa.up at 0 of shareBus
-    // // val pulseMemFifo = TileLinkFifoFiber() // to improve timing
-    // // pulseMemFifo.up at 0 of pulseMemWa.down
-    // val pulseMemPipe = TileLinkPipeFiber(StreamPipe.FULL_KEEP) // to improve timing
-    // pulseMemPipe.up at 0 of pulseMemWa.down
-
-    // val pulseMemFibers = new Area {
-    //   // println(s"${pulseMems(i).axiPort}")
-    //   val pulseMemFiber = TileLinkMemReadWriteFiber(pulseMem.axiPort)
-    //   pulseMemFiber.up at 0 of pulseMemPipe.down
-    // }
-  }
-
-  val dac = List.fill(4)(master port Stream(Bits(16 * 16 bits)))
-  dac.zipWithIndex.foreach { case (d, id) =>
-    Axi4StreamVivadoHelper.addStreamInference(d, s"DAC${id}_AXIS")
-  }
-  val adc = List.fill(4)(slave port Stream(Bits(4 * 16 bits)))
-  adc.zipWithIndex.foreach { case (d, id) =>
-    Axi4StreamVivadoHelper.addStreamInference(d, s"ADC${id}_AXIS")
-    d.ready := False
-  }
-
-  val en = in port Bool()
-  val enReg = RegNext(en)
-  dac(0).valid := enReg
-
-  val sqGen = SquareGenerator(4)
-  val dacInvertMsb =
-    for (d <- sqGen.io.data) yield {
-      val invertMsb = d.asBits ^ B(1 << (d.getBitsWidth - 1), d.getBitsWidth bits)
-      invertMsb
-    }
-  val dac0InReg = RegNext(dacInvertMsb.asBits)
-  dac(0).payload := dac0InReg
-
-  for (i <- 1 until 4) {
-    dac(i).valid := False
-    dac(i).payload := B(0, 256 bits)
-  }
 }
 
 case class DacSimple() extends Component {
@@ -329,14 +323,6 @@ object GenDacTester extends App {
     targetDirectory = "./riscq-vivado/dac-tester",
     romReuse = true
   ).generate(DacTester())
-}
-
-object GenDacSquare extends App {
-  SpinalConfig(
-    mode = Verilog,
-    targetDirectory = "./riscq-vivado/dac-square",
-    romReuse = true
-  ).generate(DacSquare())
 }
 
 object GenDacSimple extends App {
