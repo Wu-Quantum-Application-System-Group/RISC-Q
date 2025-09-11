@@ -38,6 +38,10 @@ class RvAssembler(wordWidth: Int) {
 
   def add(rd: Int, rs1: Int, rs2: Int) = typeR("0110011", "0000000", "000", rs1, rs2, rd)
   def sub(rd: Int, rs1: Int, rs2: Int) = typeR("0110011", "0100000", "000", rs1, rs2, rd)
+  def mul(rd: Int, rs1: Int, rs2: Int) = typeR("0110011", "0000001", "000", rs1, rs2, rd) 
+  def mulh(rd: Int, rs1: Int, rs2: Int)   = typeR("0110011", "0000001", "001", rs1, rs2, rd) 
+  def mulhsu(rd: Int, rs1: Int, rs2: Int) = typeR("0110011", "0000001", "010", rs1, rs2, rd) 
+  def mulhu(rd: Int, rs1: Int, rs2: Int)  = typeR("0110011", "0000001", "011", rs1, rs2, rd) 
 
   def typeI(opcode: String, funct3: String, imm: Int, rs1: Int, rd: Int) = {
     assert(opcode.length == 7)

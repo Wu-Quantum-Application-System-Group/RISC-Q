@@ -1,41 +1,5 @@
 ids = [f'{i}'+f'{j}' for i in range(4) for j in range (4)]
 
-# dac_map = {
-#     'DAC0': '00',
-#     'DAC1': '01',
-#     'DAC2': '02',
-#     'DAC3': '03'
-# }
-
-# adc_map = {
-#     'ADC0': '00',
-#     'ADC1': '01',
-#     'ADC2': '02',
-#     'ADC3': '03'
-# }
-
-# 4 qubits
-
-# dac_map = {
-#     'DAC0': '00',
-#     'DAC1': '01',
-#     'DAC2': '02',
-#     'DAC3': '03',
-#     'DAC4': '10',
-#     'DAC5': '11',
-#     'DAC6': '12',
-#     'DAC7': '13',
-# }
-
-# adc_map = {
-#     'ADC0': '00',
-#     'ADC1': '01',
-#     'ADC2': '02',
-#     'ADC3': '03',
-# }
-
-# 8 qubits
-
 dac_map = {
     'DAC0': '00',
     'DAC1': '01',
