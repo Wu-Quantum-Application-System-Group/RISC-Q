@@ -97,7 +97,7 @@ case class ReadoutDecoder(batchSize: Int, inWidth: Int, accWidth: Int, durWidth:
     startTime := io.startTime
     resValid := False
   }
-  val fire = start && dur.valid
+  val fire = start && Delay(dur.valid, 1)
   when(fire){
     dur.valid := False
     timer := dur.payload
