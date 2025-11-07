@@ -68,7 +68,9 @@ class PipelinePlugin(val withFetchStage: Boolean = true, val withDecodeStage: Bo
       }
 
     val deLastId = deIdToCtrl.toList.map{_._1}.max
-    skidBuffer.throwWhen(rp.isFlushedAt(deLastId).get, usingReady = false)
+    val deLastAge = deGetAge(deLastId)
+    val flushSkid = rp.isFlushedAt(deLastAge).get
+    skidBuffer.throwWhen(flushSkid, usingReady = false)
     
     prepareLock.release()
     pipelineBuildLock.await()
