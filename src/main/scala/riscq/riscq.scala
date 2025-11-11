@@ -12,7 +12,6 @@ case class RiscqParams() {
   var enableBypass = true
   var pcReset = 0x80000000L
   var withTest = false
-  var withMul = false
 
   val rfReadAt = -1 - rfReadSync.toInt
 
@@ -47,9 +46,6 @@ case class RiscqParams() {
     plugins += new execute.BarrelShifterPlugin(shiftAt = 0, formatAt = 0)
     plugins += new execute.BranchPlugin(aluAt = 0, jumpAt = 1, wbAt = 0)
     plugins += new execute.lsu.LsuCachelessNoRspStorePlugin(addressAt = 0, forkAt = 0, joinAt = 1, wbAt = 2)
-    if(withMul) {
-      plugins += new execute.MulPlugin(splitAt = 0, partialMulAt = 0, add1At = 1, add2At = 2, formatAt = 2)
-    }
     if(withTest) {
       plugins += new test.WhiteboxerPlugin()
     }

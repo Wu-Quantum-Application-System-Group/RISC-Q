@@ -25,6 +25,10 @@ set_property -dict {PACKAGE_PIN Y34} [get_ports {mgtrefclk_0_clk_p}]
 set_property -dict {PACKAGE_PIN Y35} [get_ports {mgtrefclk_0_clk_n}]
 create_clock -period 6.4 -name mgtrefclk_0 [get_ports {mgtrefclk_0_clk_p}]
 
+set_property -dict {PACKAGE_PIN T34} [get_ports {mgtrefclk_1_clk_p}]
+set_property -dict {PACKAGE_PIN T35} [get_ports {mgtrefclk_1_clk_n}]
+create_clock -period 6.4 -name mgtrefclk_1 [get_ports {mgtrefclk_1_clk_p}]
+
 
 set_property PACKAGE_PIN AC42     [get_ports "gtyrxn_in"] ;# Bank 128 - MGTYRXN0_128
 set_property PACKAGE_PIN AC41     [get_ports "gtyrxp_in"] ;# Bank 128 - MGTYRXP0_128
@@ -38,7 +42,8 @@ create_clock -period 2.000 -name dac_clk_clk_p [get_ports {dac_clk_clk_p}]
 create_clock -period 2.000 -name adc_clk_clk_p [get_ports {adc_clk_clk_p}]
 set_clock_groups -asynchronous -group {dspClk_clk_p}
 set_clock_groups -asynchronous -group {hostClk_clk_p}
-set_clock_groups -asynchronous -group [get_clocks mgtrefclk -include_generated_clocks]
+set_clock_groups -asynchronous -group [get_clocks mgtrefclk_0 -include_generated_clocks]
+set_clock_groups -asynchronous -group [get_clocks mgtrefclk_1 -include_generated_clocks]
 # }
 
 # get_sites -filter {SITE_TYPE =~ BUFG*}

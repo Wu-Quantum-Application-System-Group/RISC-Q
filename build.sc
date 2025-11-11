@@ -8,8 +8,13 @@ val spinalVersion = "1.11.0"
 val scalaVer = "2.12.18"
 
 object q extends RootModule with SbtModule{
+  override def sources = T.sources(
+    super.sources() ++ 
+    Seq(PathRef(millSourcePath / "ext" / "SpinalHelios" / "Helios" / "src"  )), 
+  )
   def scalaVersion = scalaVer
   def idslPlugin = spinalIdslplugin(scalaVer)
+  
   def ivyDeps = Agg(
     ivy"org.scalatest::scalatest:3.2.17",
     ivy"org.yaml:snakeyaml:1.8",

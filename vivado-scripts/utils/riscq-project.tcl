@@ -83,7 +83,7 @@ proc create {NAME} {
 proc synth {} {
     set_property strategy Flow_PerfOptimized_high [get_runs synth_1]
     # set_property STEPS.SYNTH_DESIGN.ARGS.RETIMING true [get_runs synth_1]
-    # set_property STEPS.SYNTH_DESIGN.ARGS.GLOBAL_RETIMING on [get_runs synth_1]
+    set_property STEPS.SYNTH_DESIGN.ARGS.GLOBAL_RETIMING on [get_runs synth_1]
     # set_property -name {STEPS.SYNTH_DESIGN.ARGS.MORE OPTIONS} -value {-mode out_of_context} -objects [get_runs synth_1]
     # set_property STEPS.SYNTH_DESIGN.ARGS.FLATTEN_HIERARCHY none [get_runs synth_1]
     launch_runs synth_1
@@ -131,7 +131,11 @@ proc copy_files {} {
 }
 # set_param general.maxThreads 1
 
-if { $argc > 0 } {
+if { $argc > 1 } {
+    global TOP_MODULE
+    set TOP_MODULE [lindex $argv 0]
+    cb [lindex $argv 1]
+} elseif { $argc > 0 } {
     global TOP_MODULE
     set TOP_MODULE [lindex $argv 0]
     cb $TOP_MODULE

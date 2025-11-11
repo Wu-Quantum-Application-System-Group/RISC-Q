@@ -502,6 +502,7 @@ case class RiscqZcu216SocPorts(gtNum: Int = 0) extends Bundle {
   }
   dac.zipWithIndex.foreach { case (d, id) =>
     riscq.misc.Axi4StreamVivadoHelper.addStreamInference(d, s"DAC${id}_AXIS")
+    d.valid := True
   }
   gts.zipWithIndex.foreach { case (gt, id) =>
     gt.mgtrefclk_p.addAttribute(
@@ -513,4 +514,24 @@ case class RiscqZcu216SocPorts(gtNum: Int = 0) extends Bundle {
       s"xilinx.com:interface:diff_clock:1.0 mgtrefclk_${id}_diff CLK_N "
     )
   }
+
+  def noDac() = {
+    dac.foreach { d =>
+      d.payload := 0
+    }
+  }
+}
+
+case class RiscqZcu216MemoryMap() extends Area {
+  val riscqCoreMemOffset = 0x0
+  val riscqCoreMemSpaceSize = 1 << 16
+
+  val pulseMemOffset = 1 << 25
+  val pulseMemSpaceSize = 1 << 18
+
+  val hostCtrlOffset = 3 * (1 << 25)
+
+  def coreOffset(coreId: Int) = riscqCoreMemOffset + coreId * riscqCoreMemSpaceSize
+  def pulseOffset(coreId: Int) = pulseMemOffset + coreId * pulseMemSpaceSize
+  def riscqResetOffset = 0
 }

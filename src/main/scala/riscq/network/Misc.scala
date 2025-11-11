@@ -8,6 +8,7 @@ import spinal.lib.bus.tilelink.fabric._
 import spinal.lib.bus.tilelink
 import spinal.core.fiber.Fiber
 import riscq.misc.VivadoClkHelper
+import riscq.soc.RiscqZcu216SocPorts
 
 case class GtPins() extends Bundle {
   val gtyrxp_in = in Bool()
@@ -83,7 +84,7 @@ case class GtCoreIO(withPolarity: Boolean = false) extends Bundle {
   val rxClk = in Bool()
 }
 
-abstract class GtCore(withPolarity: Boolean = false) extends Component {
+abstract class GtCore(val withPolarity: Boolean = false) extends Component {
   val io = new GtCoreIO(withPolarity)
 }
 
@@ -96,7 +97,7 @@ case class GtCoreTopIO() extends Bundle {
   val rx_userclk = out Bool()
 }
 
-abstract class GtCoreTop[T <: GtCore](gen: =>T, withPolarity: Boolean = false, gtId: Int = 0) extends Component {
+abstract class GtCoreTop[T <: GtCore](gen: =>T, gtId: Int = 0) extends Component {
   val io = new GtCoreTopIO()
 
   val mgtrefclk_IBUFDSGTE4 = IBUFDS_GTE4()
@@ -106,6 +107,7 @@ abstract class GtCoreTop[T <: GtCore](gen: =>T, withPolarity: Boolean = false, g
   val mgtrefclk = mgtrefclk_IBUFDSGTE4.O
 
   val core = gen
+  val withPolarity = core.withPolarity
   core.io.txCmd <> io.txCmd
   io.rxRsp <> core.io.rxRsp
 
@@ -213,177 +215,26 @@ case class IBUFDS_GTE4() extends BlackBox {
   val ODIV2 = out Bool()
 }
 
-// runs in txCd
-case class LatencyTestMaster() extends Component {
-  val io = new Bundle {
-    val txCmd = master Stream (Bits(64 bits))
-    val rxRsp = slave Flow (Bits(64 bits))
-    val latency = out UInt (32 bits)
-    val en = in Bool ()
-  }
-
-  val time = Reg(UInt(32 bits))
-  time := time + 1
-  val txTime = Reg(UInt(32 bits))
-  val rxTime = Reg(UInt(32 bits))
-
-
-  val notFired = Reg(Bool()) setWhen(io.en) clearWhen(io.rxRsp.fire)
-  when(io.txCmd.fire) {
-    txTime := time
-  }
-  io.txCmd.payload := B("64'hfeedcafe")
-  io.txCmd.valid := io.en || notFired
-  
-  when(io.rxRsp.fire && io.rxRsp.payload === B("64'hdeadbeef")) {
-    rxTime := time
-  }
-  io.latency := RegNext(rxTime - txTime)
-}
-
-// runs in rxCd
-case class LatencyTestSlave() extends Component {
-  val io = new Bundle {
-    val txCmd = master Stream (Bits(64 bits))
-    val rxRsp = slave Flow (Bits(64 bits))
-  }
-
-  val doEcho = io.rxRsp.fire && io.rxRsp.payload === B("64'hfeedcafe")
-  val notFired = Reg(Bool()) setWhen(doEcho) clearWhen(io.txCmd.fire)
-  io.txCmd.valid := doEcho || notFired
-  io.txCmd.payload := B("64'hdeadbeef")
-}
-
-
-abstract class LatencyTester[T <: GtCore](gen: =>GtCoreTop[T]) extends Component {
-  val io = new Bundle {
-    val axi = slave(
-      Axi4(
-        Axi4Config(
-          addressWidth = 32,
-          dataWidth = 32,
-          idWidth = 2
-        )
-      )
-    )
-    val gt = GtPins()
-    val ledR = out Bool ()
-  }
-  riscq.misc.Axi4VivadoHelper.addInference(io.axi, "S_AXIS")
-  io.gt.mgtrefclk_p.addAttribute("X_INTERFACE_INFO", "xilinx.com:interface:diff_clock:1.0 mgtrefclk_diff CLK_P ")
-  io.gt.mgtrefclk_n.addAttribute("X_INTERFACE_INFO", "xilinx.com:interface:diff_clock:1.0 mgtrefclk_diff CLK_N ")
-
-  val core = gen
-  core.io.gt <> io.gt
-  val reset_n = Reg(Bool()) init False
-  core.io.reset_n := reset_n
-  io.ledR := reset_n
-
-  val hostCd = ClockDomain.current
-  val txCd = ClockDomain(core.io.tx_userclk)
-  val rxCd = ClockDomain(core.io.rx_userclk)
-
-  val reset = ClockDomain.current.readResetWire
-  val rxReset = rxCd(BufferCC(reset))
-  val txReset = txCd(BufferCC(reset))
-  val rxResetCd = ClockDomain(core.io.rx_userclk, rxReset)
-  val txResetCd = ClockDomain(core.io.tx_userclk, txReset)
-  val rxToTxBuffer = core.io.rxRsp.toStream.queue(2, rxResetCd, txCd).toFlow
-
-  val rxRsp = core.io.rxRsp.toStream.queue(2, rxResetCd, hostCd).toReg
-
-
-  val fifoLatencyTestEn = Flow(Bool())
-  val fifoCCLatencyArea = new ClockingArea(rxResetCd) {
-    val time = Reg(UInt(32 bits))
-    time := time + 1
-    val start = Reg(UInt(32 bits))
-    val end = Reg(UInt(32 bits))
-    val latency = RegNext(end - start)
-
-    val testEnFlow = fifoLatencyTestEn.toStream.queue(2, hostCd, rxResetCd).toFlow
-    val fifo = testEnFlow.toStream.queue(2, rxResetCd, txResetCd).queue(2, txResetCd, rxResetCd).toFlow
-    when(testEnFlow.valid) {
-      start := time
-    }
-    when(fifo.valid) {
-      end := time
-    }
-  }
-
-
-  val hostToTxEn = Flow(Bool())
-  val hostCmd = Stream(Bits(32 bits))
-  val hostToTxCmd = hostCmd.queue(2, ClockDomain.current, txCd)
-  val txArea = new ClockingArea(txResetCd) {
-    val master = LatencyTestMaster()
-    master.io.rxRsp << rxToTxBuffer
-    master.io.en := hostToTxEn.toStream.queue(2, hostCd, txCd).toFlow.valid
-
-    val slave = LatencyTestSlave()
-    slave.io.rxRsp := rxToTxBuffer
-
-    val hostCmdResized = Stream(Bits(64 bits))
-    hostCmdResized.valid := hostToTxCmd.valid
-    hostCmdResized.payload := B(0, 32 bits) ## hostToTxCmd.payload
-    hostToTxCmd.ready := hostCmdResized.ready
-
-    val txCmd = cloneOf(core.io.txCmd)
-    txCmd >> core.io.txCmd
-
-    val arbiter = StreamArbiterFactory().lowerFirst.onArgs(slave.io.txCmd, master.io.txCmd, hostCmdResized)
-    arbiter >> txCmd
-  }
-
-  val driver = AxiToTileLinkDriver(factory => {
-    factory.drive(reset_n, 0)
-    factory.read(reset_n, 0)
-    factory.driveStream(hostCmd, 8)
-    factory.read(rxRsp(0, 32 bits), 16)
-    factory.read(BufferCC(core.io.txCmd.ready), 20)
-    factory.driveFlow(hostToTxEn, 32)
-    factory.driveFlow(fifoLatencyTestEn, 36)
-    factory.read(ValidFlow(txArea.master.io.latency).toStream.queue(2, txResetCd, hostCd).toFlow.toReg, 64)
-    factory.read(ValidFlow(fifoCCLatencyArea.latency).toStream.queue(2, rxResetCd, hostCd).toFlow.toReg, 68)
-  })
-  driver.axi <> io.axi
-}
-
-
 abstract class SyncTester[T <: GtCore](gen: =>GtCoreTop[T]) extends Component {
+  val io = RiscqZcu216SocPorts(gtNum = 1)
+  io.noDac()
+
   val hostCd = ClockDomain.current
   hostCd.renamePulledWires("hostClk", "hostRst")
   VivadoClkHelper.addInference(hostCd.readClockWire, hostCd.readResetWire, 100000000)
-  val io = new Bundle {
-    val axi = slave(
-      Axi4(
-        Axi4Config(
-          addressWidth = 32,
-          dataWidth = 32,
-          idWidth = 2
-        )
-      )
-    )
-    val dspClk = in Bool ()
-    val dspExtRst = in Bool ()
-    val gt = GtPins()
-    val ledR = out Bool ()
-  }
-  riscq.misc.Axi4VivadoHelper.addInference(io.axi, "S_AXIS")
-  io.gt.mgtrefclk_p.addAttribute("X_INTERFACE_INFO", "xilinx.com:interface:diff_clock:1.0 mgtrefclk_diff CLK_P ")
-  io.gt.mgtrefclk_n.addAttribute("X_INTERFACE_INFO", "xilinx.com:interface:diff_clock:1.0 mgtrefclk_diff CLK_N ")
-
-  // cd500m
   io.dspClk.setName("dspClk")
-  io.dspExtRst.setName("dspExtRst")
-  val dspCd = ClockDomain(io.dspClk, io.dspExtRst)
-  VivadoClkHelper.addInference(dspCd.readClockWire, io.dspExtRst, 500000000)
+  io.dspRst.setName("dspRst")
+  val dspCd = ClockDomain(io.dspClk, io.dspRst)
+  VivadoClkHelper.addInference(dspCd.readClockWire, io.dspRst, 500000000)
+
+  riscq.misc.Axi4VivadoHelper.addInference(io.axi, "S_AXIS")
+  // io.gts(0).mgtrefclk_p.addAttribute("X_INTERFACE_INFO", "xilinx.com:interface:diff_clock:1.0 mgtrefclk_diff CLK_P ")
+  // io.gts(0).mgtrefclk_n.addAttribute("X_INTERFACE_INFO", "xilinx.com:interface:diff_clock:1.0 mgtrefclk_diff CLK_N ")
 
   val core = gen
-  core.io.gt <> io.gt
+  core.io.gt <> io.gts(0)
   val reset_n = Reg(Bool()) init False
   core.io.reset_n := reset_n
-  io.ledR := reset_n
 
   val txCd = ClockDomain(core.io.tx_userclk)
   val rxCd = ClockDomain(core.io.rx_userclk)
@@ -419,16 +270,32 @@ abstract class SyncTester[T <: GtCore](gen: =>GtCoreTop[T]) extends Component {
   val hostToTxCmd = hostCmd.queue(8, ClockDomain.current, txResetCd)
 
   val txArea = new ClockingArea(txResetCd) {
-    val echoer = LatencyTestSlave()
-    val rxBuf = core.io.rxRsp.toStream.queue(8, rxResetCd, txResetCd).toFlow
-    echoer.io.rxRsp := rxBuf
-
     val hostCmd = cloneOf(core.io.txCmd)
     hostCmd.arbitrationFrom(hostToTxCmd)
     hostCmd.payload := B(0, 32 bits) ## hostToTxCmd.payload
-    val arbiter = StreamArbiterFactory().lowerFirst.onArgs(echoer.io.txCmd, hostCmd)
-    arbiter >> core.io.txCmd
   }
+
+  val powergood = core.gt.io.gtpowergood_out.pull()
+  val txResetdone = core.gt.io.txresetdone_out.pull()
+  val rxResetdone = core.gt.io.rxresetdone_out.pull()
+  val txUserclkActive = core.gt.io.gtwiz_userclk_tx_active_out.pull()
+  val rxUserclkActive = core.gt.io.gtwiz_userclk_rx_active_out.pull()
+  val rxData = core.core.io.rx.userdata_in.pull()
+  val rxDataValid = core.core.io.rx.datavalid_in.pull()
+  val rxDataFlow = Flow(rxData)
+  rxDataFlow.payload := rxData
+  rxDataFlow.valid := rxDataValid
+  val rxDataBuf = rxDataFlow.toStream.queue(2, rxResetCd, hostCd).toReg
+  // val rxDataNonZero = RegNextWhen(rxDataBuf, rxDataBuf.orR)
+  val rxHeader = core.core.io.rx.header_in.pull()
+  val rxHeaderValid = core.core.io.rx.headervalid_in.pull()
+  val rxHeaderFlow = Flow(rxHeader)
+  rxHeaderFlow.payload := rxHeader
+  rxHeaderFlow.valid := rxHeaderValid
+  val rxHeaderBuf = rxHeaderFlow.toStream.queue(2, rxResetCd, hostCd).toReg
+  // val rxHeaderNonZero = RegNextWhen(rxHeaderBuf, rxHeaderBuf.orR)
+  val testReg = Reg(UInt(32 bits))
+  testReg := 321
 
   val driver = AxiToTileLinkDriver(factory => {
     factory.drive(reset_n, 0)
@@ -440,6 +307,76 @@ abstract class SyncTester[T <: GtCore](gen: =>GtCoreTop[T]) extends Component {
     factory.read(BufferCC(dspArea.txTime(32, 32 bits)), 28)
     factory.read(BufferCC(dspArea.rxTime(0, 32 bits)), 32)
     factory.read(BufferCC(dspArea.rxTime(32, 32 bits)), 36)
+    factory.read(BufferCC(powergood), 64)
+    factory.read(BufferCC(txResetdone), 68)
+    factory.read(BufferCC(rxResetdone), 72)
+    factory.read(BufferCC(txUserclkActive), 76)
+    factory.read(BufferCC(rxUserclkActive), 80)
+    factory.read(rxDataBuf(0, 32 bits), 84)
+    factory.read(rxDataBuf(32, 32 bits), 88)
+    // factory.read(rxDataNonZero(0, 32 bits), 92)
+    // factory.read(rxDataNonZero(32, 32 bits), 96)
+    factory.read(rxHeaderBuf, 100)
+    factory.read(testReg, 104)
+    // factory.read(rxHeaderNonZero, 104)
+  })
+  driver.axi <> io.axi
+}
+
+abstract class MultiPortTester[T <: GtCore](gen: =>GtCoreTop[T], gtNum: Int) extends Component {
+  val io = RiscqZcu216SocPorts(gtNum = gtNum)
+  io.noDac()
+
+  val hostCd = ClockDomain.current
+  hostCd.renamePulledWires("hostClk", "hostRst")
+  VivadoClkHelper.addInference(hostCd.readClockWire, hostCd.readResetWire, 100000000)
+  io.dspClk.setName("dspClk")
+  io.dspRst.setName("dspRst")
+  val dspCd = ClockDomain(io.dspClk, io.dspRst)
+  VivadoClkHelper.addInference(dspCd.readClockWire, io.dspRst, 500000000)
+
+  val cores = List.fill(gtNum)(gen)
+  (cores zip io.gts).foreach { case (core, gt) =>
+    core.io.gt <> gt
+  }
+
+  val reset_ns = List.fill(gtNum)(Reg(Bool()) init False)
+  cores.zip(reset_ns).foreach { case (core, reset_n) =>
+    core.io.reset_n := reset_n
+  }
+
+  val txCds = cores.map(c => ClockDomain(c.io.tx_userclk))
+  val rxCds = cores.map(c => ClockDomain(c.io.rx_userclk))
+
+  val reset = ClockDomain.current.readResetWire
+  val rxResets = rxCds.map(c => c(BufferCC(reset)))
+  val txResets = txCds.map(c => c(BufferCC(reset)))
+  val rxResetCds = cores.zip(rxResets).map { case (c, r) => ClockDomain(c.io.rx_userclk, r) }
+  val txResetCds = cores.zip(txResets).map { case (c, r) => ClockDomain(c.io.tx_userclk, r) }
+
+  val driver = AxiToTileLinkDriver(factory => {
+    val coreOffset = 0x100
+    val coreDriver = for((core, i) <- cores.zipWithIndex) yield new Area {
+      val coreBase = i * 0x100
+
+      factory.write(reset_ns(i), coreBase + 0)
+
+      val hostCmd = Stream(Bits(32 bits))
+      val hostToTxCmd = hostCmd.queue(2, hostCd, txResetCds(i))
+      val hostCmdResized = Stream(Bits(64 bits))
+      hostCmdResized.arbitrationFrom(hostToTxCmd)
+      hostCmdResized.payload := B(0, 32 bits) ## hostToTxCmd.payload
+
+      core.io.txCmd << hostCmdResized
+
+      factory.driveStream(hostCmd, coreBase + 4)
+
+      val rxRsp = core.io.rxRsp.toStream.queue(2, rxResetCds(i), hostCd).toReg
+      factory.read(rxRsp(0, 32 bits), coreBase + 8)
+      factory.read(rxRsp(32, 32 bits), coreBase + 12)
+
+      factory.read(BufferCC(core.io.txCmd.ready), coreBase + 16)
+    }
   })
   driver.axi <> io.axi
 }

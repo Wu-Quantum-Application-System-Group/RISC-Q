@@ -77,12 +77,14 @@ case class ClockInterface() extends Component {
   user_sysref.addAttribute("X_INTERFACE_INFO", "xilinx.com:signal:clock:1.0 user_sysref CLK")
 
   val ibufgds500m = IBUFGDS()
+  val bufg500m = BUFG()
   val ibufgds100m = IBUFGDS()
   val ibufgdsUserSysref = IBUFGDS()
 
   ibufgds500m.I := dspClk_clk_p
   ibufgds500m.IB := dspClk_clk_n
-  dspClk := ibufgds500m.O
+  bufg500m.I := ibufgds500m.O
+  dspClk := bufg500m.O
   ibufgds100m.I := hostClk_clk_p
   ibufgds100m.IB := hostClk_clk_n
   hostClk := ibufgds100m.O

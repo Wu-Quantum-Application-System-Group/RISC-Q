@@ -23,6 +23,49 @@ import spinal.lib.bus.misc.SingleMapping
 import spinal.lib.misc.PathTracer
 import riscq.misc.VivadoClkHelper
 
+object MMSocParams {
+  val pulseMemOutReg = true
+
+  val rfReadSync = false
+  val rfReadAt = -1 - rfReadSync.toInt
+  val enableBypass = true
+
+  def getPlugins(qubitNum: Int) = new Area {
+    val pcReset = 0x80000000L
+    val plugins = ArrayBuffer[FiberPlugin]()
+    val pp = new schedule.PipelinePlugin()
+    plugins += pp
+    plugins += new riscv.RiscvPlugin(xlen = 32)
+    plugins += new schedule.ReschedulePlugin()
+    plugins += new fetch.PcPlugin()
+    plugins += new fetch.FetchCachelessPlugin(
+      wordWidth = 32,
+      forkAt = 0,
+      joinAt = 4
+    )
+    // plugins += new decode.DecoderSimplePlugin(decodeAt = 0)
+    plugins += new decode.DecoderPlugin(decodeAt = 0)
+    plugins += new regfile.RegFilePlugin(
+      spec = riscv.IntRegFile,
+      physicalDepth = 32,
+      preferedWritePortForInit = "",
+      syncRead = rfReadSync,
+      dualPortRam = false,
+      maskReadDuringWrite = false
+    )
+    plugins += new execute.RegReadPlugin(rfReadAt = rfReadAt, enableBypass = enableBypass)
+    plugins += new execute.SrcPlugin(executeAt = 0, relaxedRs = true)
+    plugins += new schedule.HazardPlugin(rfReadAt = rfReadAt, hazardAt = rfReadAt, enableBypass = enableBypass)
+    plugins += new execute.WriteBackPlugin(riscv.IntRegFile, writeAt = 2, allowBypassFrom = 1)
+    plugins += new execute.IntFormatPlugin()
+    plugins += new execute.IntAluPlugin(executeAt = 0, formatAt = 0)
+    plugins += new execute.BarrelShifterPlugin(shiftAt = 0, formatAt = 0)
+    plugins += new execute.BranchPlugin(aluAt = 0, jumpAt = 1, wbAt = 0)
+    plugins += new execute.lsu.LsuCachelessNoRspStorePlugin(addressAt = 0, forkAt = 0, joinAt = 1, wbAt = 2)
+    // plugins += new execute.lsu.LsuCachelessPlugin(addressAt = 0, forkAt = 0, joinAt = 1, wbAt = 2)
+  }
+}
+
 case class MemoryMapSoc(
     qubitNum: Int,
     withWhitebox: Boolean = false,
@@ -41,9 +84,11 @@ case class MemoryMapSoc(
   val hostCd = ClockDomain(hostClk, hostRst)
   VivadoClkHelper.addInference(hostClk, hostRst, 100000000)
 
-  val params = RiscqParams()
-  params.withTest = withTest
-  val plugins = params.getPlugins().plugins
+  val pluginsArea = MMSocParams.getPlugins(qubitNum)
+  val plugins = pluginsArea.plugins
+  if (withWhitebox) {
+    plugins += new test.WhiteboxerPlugin()
+  }
 
   val hostBusArea = hostCd(HostBusArea(withTest))
   def tlBus = hostBusArea.tlBus

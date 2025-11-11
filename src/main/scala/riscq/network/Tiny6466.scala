@@ -34,7 +34,7 @@ case class Tiny6466() extends GtCore {
   val dataHeader = 1
   val controlHeader = 2
   val syncSuccessMsg = B("64'hfeedcafe")
-  // val syncingMsg = B("64'h0feedbaddeadbeef")
+  val askResetMsg = B("64'h0deadbeef")
 
   val txArea = new ClockingArea(txCd) {
     val txReady = Reg(Bool())
@@ -93,19 +93,22 @@ case class Tiny6466() extends GtCore {
         header := dataHeader
         userdata := io.txCmd.payload
       } otherwise {
-        header := controlHeader
+        // header := controlHeader // default
         userdata := lfsrArea.lfsr.io.random
       }
     } otherwise {
+      val askReset = False
       when(retryCounter < initCyclesBeforeRetry) {
         retryCounter := retryCounter + 1
       } otherwise {
         retryCounter := 0
         gearboxMatch := False
-        partnerGearboxMatch := False
+        askReset := True
       }
 
-      when(gearboxMatch) {
+      when(askReset) {
+        userdata := askResetMsg
+      } elsewhen(gearboxMatch) {
         userdata := syncSuccessMsg
       } otherwise {
         userdata := lfsrArea.lfsr.io.random
@@ -157,6 +160,9 @@ case class Tiny6466() extends GtCore {
           when(rxGearboxMatch) {
             when(io.rx.userdata_in === syncSuccessMsg) {
               rxPartnerGearboxMatch := True
+            } elsewhen(io.rx.userdata_in === askResetMsg) {
+              rxGearboxMatch := False
+              rxPartnerGearboxMatch := False
             }
           }
         } otherwise {
@@ -256,107 +262,15 @@ object GenTiny6466AxiTop extends App {
   )
 }
 
-case class TinyInspector() extends Component {
-  val io = new Bundle {
-    val axi = slave(
-      Axi4(
-        Axi4Config(
-          addressWidth = 32,
-          dataWidth = 32,
-          idWidth = 2
-        )
-      )
-    )
-    val gt = GtPins()
-    val ledR = out Bool ()
-  }
-
-  riscq.misc.Axi4VivadoHelper.addInference(io.axi, "S_AXIS")
-  io.gt.mgtrefclk_p.addAttribute("X_INTERFACE_INFO", "xilinx.com:interface:diff_clock:1.0 mgtrefclk_diff CLK_P ")
-  io.gt.mgtrefclk_n.addAttribute("X_INTERFACE_INFO", "xilinx.com:interface:diff_clock:1.0 mgtrefclk_diff CLK_N ")
-  val reset_n = Reg(Bool()) init False
-  io.ledR := reset_n
-
-  val core = Tiny6466Top()
-  core.io.gt <> io.gt
-  core.io.reset_n := reset_n
-
-  val rxBuffer = BufferCC(core.io.rxRsp)
-  val rxRsp = Reg(core.io.rxRsp.payload)
-  when(rxBuffer.valid) {
-    rxRsp := rxBuffer.payload
-  }
-
-  val txCd = ClockDomain(core.io.tx_userclk)
-  val txBuffer = StreamFifoCC(core.io.txCmd.payload, 4, ClockDomain.current, txCd)
-  txBuffer.io.pop >> core.io.txCmd
-  val txBufferLow = Stream(Bits(32 bits))
-  val txBufferHigh = Reg(Bits(32 bits)) init 0
-  txBuffer.io.push.valid := txBufferLow.valid
-  txBuffer.io.push.payload := txBufferHigh ## txBufferLow.payload
-  txBufferLow.ready := txBuffer.io.push.ready
-
-  val rxCd = ClockDomain(core.io.rx_userclk)
-  val rxArea = new ClockingArea(rxCd) {
-    val headerBuffer = Reg(Bits(2 bits))
-    val dataBuffer = Reg(Bits(64 bits))
-    // when(core.core.io.rx.headervalid_in.pull() && core.core.io.rx.datavalid_in.pull()) {
-    headerBuffer := core.core.io.rx.header_in.pull()
-    dataBuffer := core.core.io.rx.userdata_in.pull()
-    // }
-  }
-
-  val driver = AxiToTileLinkDriver(factory => {
-    factory.drive(reset_n, 0)
-    factory.read(reset_n, 0)
-    factory.driveStream(txBufferLow, 4)
-    factory.drive(txBufferHigh, 8)
-    factory.read(rxRsp(0, 32 bits), 12)
-    factory.read(rxRsp(32, 32 bits), 16)
-    factory.read(BufferCC(core.gt.io.rxresetdone_out.pull()), 32)
-    factory.read(BufferCC(core.gt.io.txresetdone_out.pull()), 36)
-    factory.read(BufferCC(core.gt.io.gtpowergood_out.pull()), 40)
-    factory.read(BufferCC(core.io.txCmd.ready), 44)
-    factory.read(BufferCC(core.core.rxGearboxMatch.pull()), 64)
-    factory.read(BufferCC(core.core.rxPartnerGearboxMatch.pull()), 68)
-    factory.read(BufferCC(core.core.rxArea.gearBoxMatchCounter.pull()), 72)
-    factory.read(BufferCC(rxArea.headerBuffer), 76)
-    factory.read(BufferCC(rxArea.dataBuffer)(0, 32 bits), 80)
-    factory.read(BufferCC(rxArea.dataBuffer)(32, 32 bits), 84)
-  })
-  driver.axi <> io.axi
-}
-
-object GenTinyInspector extends App {
-  SpinalConfig(
-    mode = Verilog,
-    targetDirectory = "./build/rtl/",
-    romReuse = true
-  ).generate(
-    TinyInspector()
-  )
-}
-
-case class Tiny6466LatencyTester() extends LatencyTester(Tiny6466Top())
-
-object GenTiny6466LatencyTester extends App {
-  SpinalConfig(
-    mode = Verilog,
-    targetDirectory = "./build/rtl/",
-    romReuse = true
-  ).generate(
-    Tiny6466LatencyTester()
-  )
-}
-
-case class Tiny6466SyncTester() extends SyncTester(Tiny6466Top())
+case class Tiny6466SyncTester(id: Int = 0) extends SyncTester(Tiny6466Top(id))
 
 object GenTiny6466SyncTester extends App {
   SpinalConfig(
     mode = Verilog,
     targetDirectory = "./build/rtl/",
     romReuse = true
-  ).generate(
-    Tiny6466SyncTester()
-  )
+  ).generate{
+    val dut = Tiny6466SyncTester()
+    dut
+  }
 }

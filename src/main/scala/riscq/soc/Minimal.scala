@@ -21,10 +21,53 @@ import riscq.memory.DualClockRam
 import spinal.lib.eda.bench.Bench
 import riscq.misc.XilinxRfsocTarget
 
+object MinimalSocPlugins {
+  def getplugins(
+    wordWidth: Int = 32, 
+    regFileSync: Boolean = false,
+    enableBypass: Boolean = true
+    ) = new Area {
+    val plugins = ArrayBuffer[FiberPlugin]()
+    plugins += new schedule.PipelinePlugin()
+    plugins += new riscv.RiscvPlugin(xlen = 32)
+    plugins += new schedule.ReschedulePlugin()
+    val pcPlugin = new fetch.PcPlugin()
+    plugins += pcPlugin
+    plugins += new fetch.FetchCachelessPlugin(
+      wordWidth = wordWidth,
+      forkAt = 0,
+      joinAt = 1
+    )
+    // plugins += new decode.DecoderSimplePlugin(decodeAt = 0)
+    plugins += new decode.DecoderPlugin(decodeAt = 0)
+    plugins += new regfile.RegFilePlugin(
+      spec = riscv.IntRegFile,
+      physicalDepth = 32,
+      preferedWritePortForInit = "",
+      syncRead = regFileSync,
+      dualPortRam = false,
+      maskReadDuringWrite = false
+    )
+    val rfReadAt = -1 - regFileSync.toInt
+    plugins += new execute.RegReadPlugin(rfReadAt = rfReadAt, enableBypass = enableBypass)
+    plugins += new execute.SrcPlugin(executeAt = 0, relaxedRs = true)
+    plugins += new schedule.HazardPlugin(rfReadAt = rfReadAt, hazardAt = rfReadAt, enableBypass = enableBypass)
+    plugins += new execute.WriteBackPlugin(riscv.IntRegFile, writeAt = 2, allowBypassFrom = 0)
+    plugins += new execute.IntFormatPlugin()
+    plugins += new execute.IntAluPlugin(executeAt = 0, formatAt = 0)
+    plugins += new execute.BranchPlugin(aluAt = 0, jumpAt = 1, wbAt = 0)
+    // plugins += new execute.lsu.LsuCachelessPlugin(addressAt = 0, forkAt = 0, joinAt = 1, wbAt = 2)
+    plugins += new execute.lsu.LsuCachelessNoRspStorePlugin(addressAt = 0, forkAt = 0, joinAt = 1, wbAt = 2)
+    // plugins += new test.WhiteboxerPlugin()
+  }
+}
+
 case class MinimalSoc(whiteboxer: Boolean = false, wordWidth: Int = 32, regFileSync: Boolean = false) extends Component {
-  val params = RiscqParams()
-  params.withTest = whiteboxer
-  var plugins = params.getPlugins().plugins
+  val pluginArea = MinimalSocPlugins.getplugins(wordWidth = wordWidth, regFileSync = regFileSync)
+  var plugins = pluginArea.plugins
+  if(whiteboxer) {
+    plugins += new test.WhiteboxerPlugin()
+  }
   val iMem = Mem.fill(1024)(Bits(wordWidth bit)).simPublic()
   val dMem = Mem.fill(1024)(Bits(32 bit)).simPublic()
 
@@ -38,7 +81,7 @@ case class MinimalSoc(whiteboxer: Boolean = false, wordWidth: Int = 32, regFileS
     case _ =>
   }
 
-  val riscq = RiscQ(plugins)
+  val riscq = RiscQ(pluginArea.plugins)
 
   // We need some output to avoid vivado removing everything in optimization
   val dummyPort = slave port iMem.readWriteSyncPort(maskWidth = wordWidth / 8)
@@ -53,4 +96,43 @@ object BenchMinimalSoc extends App {
     )
   )
   Bench(List(rtl), XilinxRfsocTarget(1000 MHz), "./build/")
+}
+
+// - Virtex UltraScale+ -> 604 Mhz 727 LUT 882 FF 0 BRAM 0 URAM
+object BenchMinimal extends App {
+  val rtl = Rtl(SpinalVerilog {
+    val pluginArea = MinimalSocPlugins.getplugins()
+    RiscQ(pluginArea.plugins)
+  })
+  Bench(List(rtl), XilinxRfsocTarget(), "./build/")
+}
+
+case class MinimalTlSoc() extends Component {
+  val pluginArea = MinimalSocPlugins.getplugins()
+  val plugins = pluginArea.plugins
+  val riscq = RiscqFiber(plugins)
+
+  val iMem = Mem.fill(1024)(Bits(32 bit)).simPublic()
+  val dMem = Mem.fill(1024)(Bits(32 bit)).simPublic()
+
+  val dMemFiber = TileLinkMemReadWriteFiber(dMem.readWriteSyncPort(maskWidth = 32 / 8), withOutReg = false)
+
+  val iMemPort = iMem.readWriteSyncPort(maskWidth = 32 / 8)
+  val iMemFiber = TileLinkMemReadWriteFiber(iMemPort, withOutReg = false)
+  iMemPort.wdata := 0
+  iMemPort.mask := iMemPort.mask.getAllTrue
+
+  iMemFiber.up at 0 of riscq.iBus
+  dMemFiber.up at 0 of riscq.dBus
+
+  val dummyPort = slave port iMem.readWriteSyncPort(maskWidth = 32 / 8)
+}
+
+object BenchMinimalTl extends App {
+  val rtl = Rtl(
+    SpinalVerilog(
+      MinimalTlSoc()
+    )
+  )
+  Bench(List(rtl), XilinxRfsocTarget(1000 MHz), "./bench")
 }

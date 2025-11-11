@@ -647,7 +647,7 @@ object TestEmmetCore extends App {
     }
 }
 
-case class EmmetCoreTop() extends GtCoreTop(EmmetCore(), true)
+case class EmmetCoreTop(gtId: Int = 0) extends GtCoreTop(EmmetCore(), gtId = gtId)
 
 object GenEmmetCoreTop extends App {
   SpinalVerilog(EmmetCoreTop())
@@ -748,14 +748,27 @@ object GenEmmetCoreAxiTop extends App {
 //   driver.axi <> io.axi
 // }
 
-case class EmmetLatencyTester() extends LatencyTester(EmmetCoreTop())
+case class EmmetSyncTester() extends SyncTester(EmmetCoreTop())
 
-object GenEmmetLatencyTester extends App {
+object GenEmmetSyncTester extends App {
+  SpinalConfig(
+    mode = Verilog,
+    targetDirectory = "./build/rtl/",
+    romReuse = true
+  ).generate{
+    val dut = EmmetSyncTester()
+    dut
+  }
+}
+
+case class EmmetTwoPortTester() extends MultiPortTester(EmmetCoreTop(), 2)
+
+object GenEmmetTwoPortTester extends App {
   SpinalConfig(
     mode = Verilog,
     targetDirectory = "./build/rtl/",
     romReuse = true
   ).generate(
-    EmmetLatencyTester()
+    EmmetTwoPortTester()
   )
 }

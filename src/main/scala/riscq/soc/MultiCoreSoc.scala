@@ -127,7 +127,6 @@ case class MultiCoreSoc(
         riscqCores(coreId).rfArea.pgs(channelId).io.pulse.payload
       }
 
-      io.dac(dacId).valid := True
       val dacPayload = cloneOf(io.dac(dacId).payload)
       io.dac(dacId).payload := dacPayload
       if (pulses.isEmpty) {

@@ -27,3 +27,5 @@ sim_build
 *.tldr
 *.excalidraw
 *.bak
+
+src/main/scala/riscq/scratch/**

@@ -15,6 +15,93 @@ import spinal.lib.io.TriStateArray
 import scala.math
 import scala.collection.mutable.ArrayBuffer
 
+// class TileLinkMemReadWriteLogic[T <: Data](p : BusParameter, port: MemReadWritePort[T], withOutReg: Boolean) extends Area {
+//   val io = new Area{
+//     val up = Bus(p)
+//   }
+//   val dataBytes = math.ceil(port.dataType.getBitsWidth / 8.0).toInt
+//   val addressWidth = port.address.getBitsWidth + log2Up(dataBytes)
+
+//   val pipeline = new Pipeline{
+//     val cmd = new Stage{
+//       val IS_GET = insert(Opcode.A.isGet(io.up.a.opcode))
+//       val SIZE = insert(io.up.a.size)
+//       val SOURCE = insert(io.up.a.source)
+//       val LAST = insert(True)
+
+//       valid := io.up.a.valid
+//       io.up.a.ready := isReady
+
+//       val addressShifted = (io.up.a.address >> log2Up(p.dataBytes))
+//       port.enable := isFireing
+//       port.write := !IS_GET
+//       if(p.withDataA) {
+//         port.wdata.assignFromBits(io.up.a.data)
+//         port.mask := io.up.a.mask
+//       }
+
+//       val withFsm = io.up.p.beatMax != 1
+//       if (!withFsm) port.address := addressShifted
+//       val fsm = withFsm generate new Area {
+//         val counter = Reg(io.up.p.beat) init (0)
+//         val address = Reg(cloneOf(port.address))
+//         val size = Reg(io.up.p.size)
+//         val source = Reg(io.up.p.source)
+//         val isGet = Reg(Bool())
+//         val busy = counter =/= 0
+//         when(busy && isGet) {
+//           io.up.a.ready := False
+//           valid := True
+//         }
+
+//         when(io.up.a.fire && !busy){
+//           size := io.up.a.size
+//           source := io.up.a.source
+//           isGet := Opcode.A.isGet(io.up.a.opcode)
+//           address := addressShifted
+//         }
+
+//         LAST clearWhen(counter =/= sizeToBeatMinusOne(io.up.p,SIZE))
+//         when(busy){
+//           SIZE := size
+//           SOURCE := source
+//           IS_GET := isGet
+//         }
+//         when(isFireing) {
+//           counter := counter + 1
+//           when(LAST) {
+//             counter := 0
+//           }
+//         }
+//         port.address := busy.mux(address, addressShifted) | counter.resized
+//       }
+
+//     }
+
+//     val skidBuffer = withOutReg generate new Stage(Connection.S2M())
+//     val buf = withOutReg generate new Stage(Connection.M2S())
+
+//     val rsp = new Stage(Connection.M2S()){
+//       val takeIt = cmd.LAST || cmd.IS_GET
+//       haltWhen(!io.up.d.ready && takeIt)
+//       io.up.d.valid := valid && takeIt
+//       io.up.d.opcode := cmd.IS_GET.mux(Opcode.D.ACCESS_ACK_DATA, Opcode.D.ACCESS_ACK)
+//       io.up.d.param := 0
+//       io.up.d.source := cmd.SOURCE
+//       io.up.d.size := cmd.SIZE
+//       io.up.d.denied := False
+//       io.up.d.corrupt := False
+//       io.up.d.data := port.rdata.asBits
+//     }
+//     build()
+//   }
+
+//   // val ordering = Flow(OrderingCmd(p.sizeBytes))
+//   // ordering.valid := io.up.a.fire && io.up.a.isLast()
+//   // ordering.debugId := io.up.a.debugId
+//   // ordering.bytes := (U(1) << io.up.a.size).resized
+//   // Component.current.addTag(new OrderingTag(ordering.stage()))
+// }
 case class TileLinkMemWriteLogic[T <: Data](p: BusParameter, memPort: Flow[MemWriteCmd[T]])
     extends Component {
   assert(p.beatMax == 1, f"beatMax must be 1, but got ${p.beatMax}")

@@ -2,3 +2,7 @@
 	path = ext/SpinalHDL
 	url = https://github.com/JunyiLiu1994/SpinalHDL
 	branch = dev
+[submodule "ext/SpinalHelios"]
+	path = ext/SpinalHelios
+	url = github:ethanlee515/SpinalHelios
+	active = true
