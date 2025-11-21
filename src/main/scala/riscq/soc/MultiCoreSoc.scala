@@ -107,7 +107,8 @@ case class MultiCoreSoc(
         dacChannels = 2,
         adcChannels = 1,
         memDepth = 1024,
-        memWidth = 32
+        memWidth = 32,
+        fifoNum = 2
       )
     )
     riscqCores.foreach { riscq =>
@@ -176,6 +177,10 @@ case class MultiCoreSoc(
   })
   hostCtrlDriver.up.setUpConnection(a = StreamPipe.FULL, d = StreamPipe.FULL)
   hostCtrlDriver.up at SizeMapping(hostCtrlOffset, 1 << 24) of hostBus
+
+  Fiber build new Area {
+    riscqArea.riscqCores(0).dMemPortDec.bus.get.simPublic()
+  }
 
 }
 

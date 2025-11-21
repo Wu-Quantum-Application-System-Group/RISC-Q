@@ -260,6 +260,8 @@ object MemMapReg {
   def pgDurOffset(i: Int) = pgIdOffset(i) + 8
   def pgFreqOffset(i: Int) = pgIdOffset(i) + 12
   def pgPhaseOffset(i: Int) = pgIdOffset(i) + 16
+  def pgInIdOffset(i: Int) = pgIdOffset(i) + 20
+  def pgOutIdOffset(i: Int) = pgIdOffset(i) + 24
 
   def dcgIdOffset(i: Int) = dcgStep * i
   def dcgFreqOffset(i: Int) = dcgIdOffset(i) + 0

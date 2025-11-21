@@ -459,7 +459,7 @@ case class QECSlaveTxController(
 object GenQECSoc extends App {
   // val qubitNum = 8
   // val dacMap = (0 until qubitNum).flatMap { i => List(((i, 0), 0), ((i, 1), i + 1)) }.toMap
-  val qubitNum = 10
+  val qubitNum = 14
   val dacMap = (0 until qubitNum).flatMap { i => List(((i, 0), 0), ((i, 1), i + 1 )) }.toMap
   val adcMap = (0 until qubitNum).map { i => (i, 12) }.toMap
   // val adcMap = (0 until qubitNum).map { i => (i, i / 7 + 12) }.toMap

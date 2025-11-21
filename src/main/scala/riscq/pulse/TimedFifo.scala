@@ -8,7 +8,8 @@ import spinal.lib._
 case class TimedFifo[T <: Data](
   dataType: HardType[T],
   depth: Int,
-  timeWidth: Int
+  timeWidth: Int,
+  popCond: String = "geq",
 ) extends Component {
   val latency = 1 // time between io.tiem >= startTime and io.pop.valid = true
   val timedData = HardType(new Bundle {
@@ -30,7 +31,15 @@ case class TimedFifo[T <: Data](
   )
 
   // val doPop = RegNext(io.time === fifo.io.pop.startTime)
-  val timeUp = RegNext(io.time >= fifo.io.pop.startTime)
+  val timeUp = Reg(Bool())
+  popCond match {
+    case "geq" =>
+      timeUp := RegNext(io.time >= fifo.io.pop.startTime)
+    case "eq" =>
+      timeUp := RegNext(io.time === fifo.io.pop.startTime)
+    case _ =>
+      throw new Exception(s"Invalid popCond: $popCond")
+  }
   val popped = RegNext(timeUp)
   val doPop = timeUp && ~popped
   fifo.io.push << io.push

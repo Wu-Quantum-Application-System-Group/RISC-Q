@@ -165,3 +165,68 @@ object TestMultiCoreSocPulse extends App {
       }
     }
 }
+
+object TestMultiCoreSocFeedback extends App {
+  val qubitNum = 1
+  val dacMap = (0 until qubitNum).flatMap { i => List(((i, 0), 2 * i), ((i, 1), 2 * i + 1)) }.toMap
+  val adcMap = (0 until qubitNum).map { i => (i, i) }.toMap
+  val simConfig = SimConfig
+  simConfig.addSimulatorFlag("--x-initial 0")
+  simConfig
+    .compile {
+      val dut = new MultiCoreSoc(qubitNum = qubitNum, dacMap = dacMap, adcMap = adcMap, withTest = true)
+      dut.riscqArea.time.simPublic()
+      dut.riscqArea.riscqCores(0).timeMemMap.timeCmp.simPublic()
+      dut.riscqArea.riscqCores(0).rfArea.rds(0).io.simPublic()
+      dut.riscqArea.riscqCores(0).rfArea.pgs(0).io.simPublic()
+      dut
+    }
+    .doSim { dut =>
+      val driver = new Driver(dut)
+      import driver._
+
+      init()
+
+      axi4Driver.write(dut.hostCtrlOffset, List(0x01, 0x00, 0x00, 0x00)) // riscq reset up
+
+      val batchSize = 16
+      val dataWidth = 16
+      for (coreId <- 0 until qubitNum) {
+        for (channelId <- 0 until 2) {
+          for (i <- 0 until 1024) {
+            val dt = if (i == 0) BigInt(1 << 12) else BigInt((1 << 15) - 1)
+            val batch = List.fill(batchSize)(dt)
+            val dataStr = batch.map { x => ByteHelper.intToBinStr(x, dataWidth) }.reduce { _ ++ _ }
+            dut.riscqArea.riscqCores(coreId).pulseMemFiber.pulseMems(channelId).mem.setBigInt(i, BigInt(dataStr, 2))
+          }
+        }
+      }
+      hostCd.waitRisingEdge()
+
+      val elfFile = new File("software-example/feedback-latency-test/build/feedback-latency-test.elf")
+      val elf = new Elf(elfFile, addressWidth = 32)
+      for(coreId <- 0 until qubitNum) {
+        elf.load(dut.riscqArea.riscqCores(coreId).mem.mem, -0x80000000)
+      }
+
+      dspCd.assertReset()
+      dspCd.waitRisingEdge()
+      dspCd.deassertReset()
+
+      axi4Driver.write(dut.hostCtrlOffset, List(0x00, 0x00, 0x00, 0x00)) // riscq reset down
+
+      val monitor = new Monitor(dut.riscqArea.riscqCores(0).riscqFiber.dBus.bus, dspCd)
+      monitor.add(new MonitorSubscriber {
+        override def onA(a: TransactionA) = { logTime(); println(a); println(s"timecmp: ${dut.riscqArea.riscqCores(0).timeMemMap.timeCmp.toBigInt}") }
+        override def onD(d: TransactionD) = { logTime(); println(d) }
+      })
+      waitUntil(400)
+      for(j <- 1 until 100) {
+        print(s"time: ${dutTime}")
+        print(s"readout valid: ${dut.riscqArea.riscqCores(0).rfArea.rds(0).io.res.valid.toBoolean}")
+        print(s"pg out id: ${dut.riscqArea.riscqCores(0).rfArea.pgs(0).io.outId.valid.toBigInt}")
+        println("")
+        tick()
+      }
+    }
+}

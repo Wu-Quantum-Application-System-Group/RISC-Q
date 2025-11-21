@@ -93,7 +93,7 @@ case class HostBusArea(withTest: Boolean) extends Area {
   }
 }
 
-case class RFArea(dacChannels: Int, adcChannels: Int, envAddrWidth: Int = 12, fifoDepth: Int = 2) extends Area {
+case class RFArea(dacChannels: Int, adcChannels: Int, envAddrWidth: Int = 12, fifoDepth: Int = 2, fifoNum: Int = 1) extends Area {
   val time = UInt(32 bit)
   val timeBuf = RegNext(time)
   timeBuf.addAttribute("MAX_FANOUT", "32")
@@ -114,7 +114,8 @@ case class RFArea(dacChannels: Int, adcChannels: Int, envAddrWidth: Int = 12, fi
         durWidth = 16,
         memLatency = 1 + 1, // sync read latency + out reg
         timeInOffset = 1,
-        fifoDepth = fifoDepth
+        fifoDepth = fifoDepth,
+        fifoNum = fifoNum
       )
     )
     pgs.foreach { pg =>
@@ -191,6 +192,10 @@ case class RFFiber(rfArea: RFArea) extends Area {
       pgFactory.driveFlow(getDriveReg(pg.io.dur), pgTlOffset + pgDurOffset(id), bitOffset = 16)
       pgFactory.driveFlow(getDriveReg(pg.io.freq), pgTlOffset + pgFreqOffset(id), bitOffset = 16)
       pgFactory.driveFlow(getDriveReg(pg.io.phase), pgTlOffset + pgPhaseOffset(id), bitOffset = 16)
+      if(rfArea.fifoNum > 1) {
+        pgFactory.driveFlow(getDriveReg(pg.io.inId), pgTlOffset + pgInIdOffset(id), bitOffset = 16)
+        pgFactory.driveFlow(getDriveReg(pg.io.outId), pgTlOffset + pgOutIdOffset(id))
+      }
     }
 
     val dcgs = rfArea.dcgs
@@ -292,7 +297,8 @@ case class RiscqRfFiber(
     memDepth: Int = 1024,
     memWidth: Int = 32,
     memOutReg: Boolean = true,
-    fifoDepth: Int = 2
+    fifoDepth: Int = 2,
+    fifoNum: Int = 1
 ) extends Area {
 
   val riscqFiber = riscqCd(RiscqFiber(plugins))
@@ -322,7 +328,7 @@ case class RiscqRfFiber(
   iBusFiber.up at 0 of iMemPortArb
 
   val rfArea = riscqCd(
-    RFArea(dacChannels = dacChannels, adcChannels = adcChannels, envAddrWidth = 10, fifoDepth = fifoDepth)
+    RFArea(dacChannels = dacChannels, adcChannels = adcChannels, envAddrWidth = 10, fifoDepth = fifoDepth, fifoNum = fifoNum)
   )
   val pulseMemFiber = hostCd(PulseMemFiber(dacChannels, 256, 1024, true, hostCd, dspCd))
 

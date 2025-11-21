@@ -17,6 +17,7 @@ case class PulseGenerator(
   memLatency: Int = 2,
   timeInOffset: Int = 0, // real_time - io.time
   fifoNum: Int = 1, // number of parallel fifos for a parameter
+  var fifoTimeWidth: Int = -1, // if -1, use timeWidth
 ) extends Component {
   val batchWidth = batchSize * dataWidth
   assert(fifoNum >= 1)
@@ -62,12 +63,15 @@ case class PulseGenerator(
   val inId = needMux generate (RegNextWhen(io.inId.payload, io.inId.valid) init 0)
   val outId = needMux generate (RegNextWhen(io.outId.payload, io.outId.valid) init 0)
 
-  val ampFifos = List.fill(fifoNum)(TimedFifo(io.amp.payload, fifoDepth, timeWidth))
-  val phaseGenFreqFifos = List.fill(fifoNum)(TimedFifo(io.freq.payload, fifoDepth, timeWidth))
-  val cgFreqFifos = List.fill(fifoNum)(TimedFifo(io.freq.payload, fifoDepth, timeWidth))
-  val phaseFifos = List.fill(fifoNum)(TimedFifo(io.phase.payload, fifoDepth, timeWidth))
-  val addrFifos = List.fill(fifoNum)(TimedFifo(io.addr.payload, fifoDepth, timeWidth))
-  val durFifos = List.fill(fifoNum)(TimedFifo(io.dur.payload, fifoDepth, timeWidth))
+  if(fifoTimeWidth == -1) {
+    fifoTimeWidth = timeWidth
+  }
+  val ampFifos = List.fill(fifoNum)(TimedFifo(io.amp.payload, fifoDepth, fifoTimeWidth))
+  val phaseGenFreqFifos = List.fill(fifoNum)(TimedFifo(io.freq.payload, fifoDepth, fifoTimeWidth))
+  val cgFreqFifos = List.fill(fifoNum)(TimedFifo(io.freq.payload, fifoDepth, fifoTimeWidth))
+  val phaseFifos = List.fill(fifoNum)(TimedFifo(io.phase.payload, fifoDepth, fifoTimeWidth))
+  val addrFifos = List.fill(fifoNum)(TimedFifo(io.addr.payload, fifoDepth, fifoTimeWidth))
+  val durFifos = List.fill(fifoNum)(TimedFifo(io.dur.payload, fifoDepth, fifoTimeWidth))
 
   def connectFifos[T <: Data](fifos: List[TimedFifo[T]], inData: Flow[T], outData: Flow[T], latency: Int) = {
     fifos.foreach{ fifo =>
@@ -163,6 +167,7 @@ case class SimplePulseGenerator(
   cg.io.freq << io.cgFreq
 
   val phaseLatency = cg.phaseLatency + envMult.latency + pulseBufLatency
+  // println(s"phaseLatency: $phaseLatency, cgphase: ${cg.phaseLatency}, cossin: ${cg.cosSin.latency}, envMult: ${envMult.latency}, pulseBuf: ${pulseBufLatency}  ")
   cg.io.phase << io.phase
 
   val ampLatency = cg.ampLatency + envMult.latency + pulseBufLatency
