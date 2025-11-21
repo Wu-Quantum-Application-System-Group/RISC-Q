@@ -18,6 +18,7 @@ case class PulseGenerator(
   timeInOffset: Int = 0, // real_time - io.time
   fifoNum: Int = 1, // number of parallel fifos for a parameter
   var fifoTimeWidth: Int = -1, // if -1, use timeWidth
+  fifoCond: String = "geq",
 ) extends Component {
   val batchWidth = batchSize * dataWidth
   assert(fifoNum >= 1)
@@ -66,23 +67,23 @@ case class PulseGenerator(
   if(fifoTimeWidth == -1) {
     fifoTimeWidth = timeWidth
   }
-  val ampFifos = List.fill(fifoNum)(TimedFifo(io.amp.payload, fifoDepth, fifoTimeWidth))
-  val phaseGenFreqFifos = List.fill(fifoNum)(TimedFifo(io.freq.payload, fifoDepth, fifoTimeWidth))
-  val cgFreqFifos = List.fill(fifoNum)(TimedFifo(io.freq.payload, fifoDepth, fifoTimeWidth))
-  val phaseFifos = List.fill(fifoNum)(TimedFifo(io.phase.payload, fifoDepth, fifoTimeWidth))
-  val addrFifos = List.fill(fifoNum)(TimedFifo(io.addr.payload, fifoDepth, fifoTimeWidth))
-  val durFifos = List.fill(fifoNum)(TimedFifo(io.dur.payload, fifoDepth, fifoTimeWidth))
+  val ampFifos = List.fill(fifoNum)(TimedFifo(io.amp.payload, fifoDepth, fifoTimeWidth, fifoCond))
+  val phaseGenFreqFifos = List.fill(fifoNum)(TimedFifo(io.freq.payload, fifoDepth, fifoTimeWidth, fifoCond))
+  val cgFreqFifos = List.fill(fifoNum)(TimedFifo(io.freq.payload, fifoDepth, fifoTimeWidth, fifoCond))
+  val phaseFifos = List.fill(fifoNum)(TimedFifo(io.phase.payload, fifoDepth, fifoTimeWidth, fifoCond))
+  val addrFifos = List.fill(fifoNum)(TimedFifo(io.addr.payload, fifoDepth, fifoTimeWidth, fifoCond))
+  val durFifos = List.fill(fifoNum)(TimedFifo(io.dur.payload, fifoDepth, fifoTimeWidth, fifoCond))
 
   def connectFifos[T <: Data](fifos: List[TimedFifo[T]], inData: Flow[T], outData: Flow[T], latency: Int) = {
     fifos.foreach{ fifo =>
       fifo.io.push.payload.data := inData.payload
-      fifo.io.push.payload.startTime := startTime
+      fifo.io.push.payload.startTime := startTime.resized
       if (needMux) {
         fifo.io.push.valid := False
       } else {
         fifo.io.push.valid := inData.valid
       }
-      fifo.io.time := shiftedTime(latency)
+      fifo.io.time := shiftedTime(latency).resized
     }
 
     if(needMux) {

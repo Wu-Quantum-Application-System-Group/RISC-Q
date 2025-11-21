@@ -33,8 +33,10 @@ case class TimedFifo[T <: Data](
   // val doPop = RegNext(io.time === fifo.io.pop.startTime)
   val timeUp = Reg(Bool())
   popCond match {
-    case "geq" =>
+    case "geq" =>{
+      assert(fifo.io.pop.startTime.getBitsWidth <= io.time.getBitsWidth)
       timeUp := RegNext(io.time >= fifo.io.pop.startTime)
+    }
     case "eq" =>
       timeUp := RegNext(io.time === fifo.io.pop.startTime)
     case _ =>
