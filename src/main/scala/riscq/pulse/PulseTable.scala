@@ -76,9 +76,10 @@ case class PulseGeneratorWithTableFiber(
   val outId = Reg(UInt(log2Up(pulseNum) bit))
   val outParam = table(outId)
   val outParamValid = False
-  val outParamFlow = Flow(outParam)
+  val outParamFlow = Reg(Flow(outParam))
   outParamFlow.payload := outParam
   outParamFlow.valid := Delay(outParamValid, 1)
+  KeepAttribute(outParamFlow)
 
   val pg = PulseGenerator(
     batchSize = batchSize,
@@ -124,7 +125,7 @@ case class PulseGeneratorWithTableFiber(
 
     factory.driveFlow(pg.io.freq, 4, bitOffset = 16)
 
-    val pulseOffset = 16 * 4
+    val pulseOffset = 4 * 4
     for(i <- 0 until pulseNum) {
       factory.write(table(i).phase, (i + 1) * pulseOffset + 0, bitOffset = 16)
       factory.write(table(i).amp, (i + 1) * pulseOffset + 4, bitOffset = 16)

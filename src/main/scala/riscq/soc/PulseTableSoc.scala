@@ -23,10 +23,10 @@ import spinal.lib.bus.misc.SingleMapping
 import spinal.lib.misc.PathTracer
 import riscq.misc.VivadoClkHelper
 import riscq.pulse.AddTree
-import riscq.pulse.PulseGeneratorWithTableFiber
 import riscq.pulse.ComplexBatch
+import riscq.pulse.PulseGeneratorWithTableFiber
 
-case class ReadoutFiber(
+case class ReadoutDemodFiber(
   startTime: UInt,
   time: UInt,
 ) extends Area {
@@ -39,18 +39,6 @@ case class ReadoutFiber(
   )
   dcg.io.time := RegNext(time).addAttribute("EQUIVALENT_REGISTER_REMOVAL", "NO")
 
-  val readAccWidth = 28
-  val rd = pulse.ReadoutDecoder(
-      batchSize = 4,
-      inWidth = 16,
-      accWidth = readAccWidth,
-      durWidth = 16,
-      timeWidth = 32
-    )
-  rd.io.time := RegNext(time).addAttribute("EQUIVALENT_REGISTER_REMOVAL", "NO")
-  rd.io.startTime := RegNext(startTime).addAttribute("EQUIVALENT_REGISTER_REMOVAL", "NO")
-  rd.io.carrier := dcg.io.carrier
-
   val logic = Fiber build new Area {
     up.m2s.supported load tilelink.SlaveFactory.getSupported(
       addressWidth = 5,
@@ -62,15 +50,46 @@ case class ReadoutFiber(
     val factory = new tilelink.SlaveFactory(up.bus, false)
     factory.driveFlow(dcg.io.freq, 0, bitOffset = 16)
     factory.driveFlow(dcg.io.phase, 4, bitOffset = 16)
-    factory.driveFlow(rd.io.dur, 8, bitOffset = 16)
-    factory.read(rd.io.res.payload, 12)
-    factory.onReadPrimitive(SingleMapping(12), haltSensitive = false, null) {
+  }
+}
+
+case class ReadoutDecoderFiber(
+  startTime: UInt,
+  time: UInt,
+  carrier: Vec[pulse.Complex],
+) extends Area {
+  val up = Node.up()
+
+  val readAccWidth = 32
+  val rd = pulse.ReadoutDecoder(
+      batchSize = 4,
+      inWidth = 16,
+      accWidth = readAccWidth,
+      durWidth = 16,
+      timeWidth = 32
+    )
+  rd.io.time := RegNext(time).addAttribute("EQUIVALENT_REGISTER_REMOVAL", "NO")
+  rd.io.startTime := RegNext(startTime).addAttribute("EQUIVALENT_REGISTER_REMOVAL", "NO")
+  rd.io.carrier := carrier
+
+  val logic = Fiber build new Area {
+    up.m2s.supported load tilelink.SlaveFactory.getSupported(
+      addressWidth = 5,
+      dataWidth = 32,
+      allowBurst = false,
+      proposed = up.m2s.proposed
+    )
+    up.s2m.none()
+    val factory = new tilelink.SlaveFactory(up.bus, false)
+    factory.driveFlow(rd.io.dur, 0, bitOffset = 16)
+    factory.read(rd.io.res.payload, 4)
+    factory.onReadPrimitive(SingleMapping(4), haltSensitive = false, null) {
       when(!rd.io.res.valid) {
         factory.writeHalt() // and readHalt
       }
     }
-    factory.read(rd.io.real, 16)
-    factory.read(rd.io.imag, 20)
+    factory.read(rd.io.real, 8)
+    factory.read(rd.io.imag, 12)
   }
 }
 
@@ -137,6 +156,7 @@ case class RiscqRfWithPulseTableFiber(
     timeInOffset = 1,
   ))
   gateDriveFiber.up at SizeMapping(0x10000, 1 << 16) of dMemPortDec
+  gateDriveFiber.up.setUpConnection(a = StreamPipe.FULL, d = StreamPipe.FULL)
 
   val readoutDriverFiber = riscqCd(PulseGeneratorWithTableFiber(
     startTime = startTime,
@@ -152,12 +172,29 @@ case class RiscqRfWithPulseTableFiber(
     timeInOffset = 1,
   ))
   readoutDriverFiber.up at SizeMapping(0x20000, 1 << 16) of dMemPortDec
+  readoutDriverFiber.up.setUpConnection(a = StreamPipe.FULL, d = StreamPipe.FULL)
 
-  val readoutFiber = ReadoutFiber(
+  val readoutDemodFiber = riscqCd(ReadoutDemodFiber(
     startTime = startTime,
     time = time,
-  )
-  readoutFiber.up at SizeMapping(0x30000, 1 << 16) of dMemPortDec
+  ))
+  readoutDemodFiber.up at SizeMapping(0x30000, 1 << 4) of dMemPortDec
+  readoutDemodFiber.up.setUpConnection(a = StreamPipe.FULL, d = StreamPipe.FULL)
+
+  val readoutDecoderFiber = riscqCd(ReadoutDecoderFiber(
+    startTime = startTime,
+    time = time,
+    carrier = readoutDemodFiber.dcg.io.carrier,
+  ))
+  readoutDecoderFiber.up at SizeMapping(0x40000, 1 << 4) of dMemPortDec
+  readoutDecoderFiber.up.setUpConnection(a = StreamPipe.FULL, d = StreamPipe.FULL)
+
+  // val readoutFiber = riscqCd(ReadoutFiber(
+  //   startTime = startTime,
+  //   time = time,
+  // ))
+  // readoutFiber.up at SizeMapping(0x30000, 1 << 16) of dMemPortDec
+  // readoutFiber.up.setUpConnection(a = StreamPipe.FULL, d = StreamPipe.FULL)
 
   val pulseMemFiber = hostCd(PulseMemFiber(2, 256, 1024, true, hostCd, dspCd))
   for(i <- 0 until 2) {
@@ -175,7 +212,7 @@ case class RiscqRfWithPulseTableFiber(
   val adc = ComplexBatch(batchSize = 4, dataWidth = 16)
   dac(0) := gateDriveFiber.pg.io.pulse.payload
   dac(1) := readoutDriverFiber.pg.io.pulse.payload
-  readoutFiber.rd.io.adc := adc
+  readoutDecoderFiber.rd.io.adc := adc
 }
 
 case class PulseTableSoc(
@@ -262,7 +299,7 @@ case class PulseTableSoc(
 
     for ((coreId, adcId) <- adcMap) {
       (riscqCores(coreId).adc zip io.adc(adcId).payload.subdivideIn(16 bits)).foreach { case (o, i) =>
-        o.r.assignFromBits(RegNext(RegNext(i))) // 1 RegNext is too little, 3 RegNexts are too much
+        o.r.assignFromBits(RegNext(i)) // 1 RegNext is too little, 3 RegNexts are too much
         o.i := o.i.getZero
       }
     }
@@ -270,7 +307,7 @@ case class PulseTableSoc(
 
   val riscqResetHostCd = Bool()
   val bufferedHostRiscqReset = dspCd(BufferCC(riscqResetHostCd, 5))
-  val riscqResetReg = dspCd(Delay(io.dspRst, 5))
+  val riscqResetReg = dspCd(Delay(bufferedHostRiscqReset, 5))
   // riscqResetReg.addAttribute("MAX_FANOUT", 128)
   if (withTest) {
     riscqReset := riscqResetReg | io.dspRst

@@ -14,7 +14,7 @@ int main() {
 
     SET_START_TIME(start_time);
     SET_PULSE_FREQ(2, freq);
-    PULSE(2, PHASE_PI(0), 0x7fff, 0, TIME_NS(8));
+    PULSE(2, PHASE_PI(0), 0x7fff, 0, TIME_NS(2));
 
     start_time += time_step;
     WRITE_INT32(MTIMECMP, start_time - TIME_NS(140));
