@@ -46,6 +46,8 @@ proc bd {} {
 
     source ${UTILS_PATH}/rfdc.tcl
 
+    source ${UTILS_PATH}/led.tcl
+
     validate_bd_design
 
     make_wrapper -files [get_files ${BD_NAME}.bd] -top -import -force
@@ -66,13 +68,13 @@ proc create {NAME} {
     global SOURCE_PATH
     global TOP_MODULE
     add_files ${SOURCE_PATH}/${TOP_MODULE}.v
-    add_files ${SOURCE_PATH}/ClockInterface.v
 
     global BOARD
     global BD_NAME
     set BD_NAME riscq_bd
     source ${UTILS_PATH}/gty-ip.tcl
     source ${UTILS_PATH}/plip.tcl
+    add_files ${SOURCE_PATH}/ClockInterface.v
     bd
     # source ${SCRIPT_PATH}/top-bd.tcl
 
@@ -116,7 +118,10 @@ proc cb {NAME} {
     }
     create ${NAME}
     build
-    copy_files
+    global BUILD_PREFIX
+    global TOP_MODULE
+    write_hw_platform -fixed -include_bit -force -file ${BUILD_PREFIX}/${TOP_MODULE}.xsa
+    # copy_files
 }
 
 proc copy_files {} {

@@ -11,7 +11,7 @@ set_property -dict {PACKAGE_PIN D11 IOSTANDARD LVDS_25} [get_ports {user_sysref_
 
 set_property -dict {PACKAGE_PIN A13 IOSTANDARD LVDS_25} [get_ports {clk125_clk_p}]
 set_property -dict {PACKAGE_PIN A12 IOSTANDARD LVDS_25} [get_ports {clk125_clk_n}]
-create_clock -period 10.000 -name clk125_clk_p [get_ports {clk125_clk_p}]
+create_clock -period 8.000 -name clk125_clk_p [get_ports {clk125_clk_p}]
 
 
 set_property -dict {PACKAGE_PIN G12 IOSTANDARD LVDS_25} [get_ports {hostClk_clk_p}]

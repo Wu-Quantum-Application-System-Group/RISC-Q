@@ -4,9 +4,13 @@ set CLKIFC [create_bd_cell -type module -reference ClockInterface clkifc]
 create_bd_intf_port -mode Slave -vlnv xilinx.com:interface:diff_clock_rtl:1.0 dspClk
 connect_bd_intf_net [get_bd_intf_ports dspClk] [get_bd_intf_pins ${CLKIFC}/dspClk_diff]
 
-# hostClk for bus
+# # hostClk for bus
 create_bd_intf_port -mode Slave -vlnv xilinx.com:interface:diff_clock_rtl:1.0 hostClk
 connect_bd_intf_net [get_bd_intf_ports hostClk] [get_bd_intf_pins ${CLKIFC}/hostClk_diff]
+
+# clk125 for bus
+create_bd_intf_port -mode Slave -vlnv xilinx.com:interface:diff_clock_rtl:1.0 clk125
+# connect_bd_intf_net [get_bd_intf_ports clk125] [get_bd_intf_pins ${CLKIFC}/hostClk_diff]
 
 # user sysref
 create_bd_intf_port -mode Slave -vlnv xilinx.com:interface:diff_clock_rtl:1.0 user_sysref
