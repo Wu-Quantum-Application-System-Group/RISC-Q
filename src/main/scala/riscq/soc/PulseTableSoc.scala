@@ -115,6 +115,7 @@ case class RiscqRfWithPulseTableFiber(
     withOutRegFast = memOutReg,
     withOutRegSlow = memOutReg
   )
+  mem.addAttribute("KEEP_HIERARCHY", "TRUE")
 
   val iMemPortArb = Node()
   val dMemPortDec = riscqCd(Node())
@@ -142,6 +143,10 @@ case class RiscqRfWithPulseTableFiber(
   memMapFiber.up at SizeMapping(0, 1 << 16) of dMemPortDec
   memMapFiber.up.setUpConnection(a = StreamPipe.FULL, d = StreamPipe.FULL)
 
+  val rfFiber = Node()
+  rfFiber at SizeMapping(0x10000, 4 << 16) of dMemPortDec
+  rfFiber.setUpConnection(a = StreamPipe.FULL, d = StreamPipe.FULL)
+
   val gateDriveFiber = riscqCd(PulseGeneratorWithTableFiber(
     startTime = startTime,
     time = time,
@@ -155,7 +160,7 @@ case class RiscqRfWithPulseTableFiber(
     memLatency = 1 + 1,
     timeInOffset = 1,
   ))
-  gateDriveFiber.up at SizeMapping(0x10000, 1 << 16) of dMemPortDec
+  gateDriveFiber.up at SizeMapping(0, 1 << 16) of rfFiber
   gateDriveFiber.up.setUpConnection(a = StreamPipe.FULL, d = StreamPipe.FULL)
 
   val readoutDriverFiber = riscqCd(PulseGeneratorWithTableFiber(
@@ -171,14 +176,14 @@ case class RiscqRfWithPulseTableFiber(
     memLatency = 1 + 1,
     timeInOffset = 1,
   ))
-  readoutDriverFiber.up at SizeMapping(0x20000, 1 << 16) of dMemPortDec
+  readoutDriverFiber.up at SizeMapping(0x10000, 1 << 16) of rfFiber
   readoutDriverFiber.up.setUpConnection(a = StreamPipe.FULL, d = StreamPipe.FULL)
 
   val readoutDemodFiber = riscqCd(ReadoutDemodFiber(
     startTime = startTime,
     time = time,
   ))
-  readoutDemodFiber.up at SizeMapping(0x30000, 1 << 4) of dMemPortDec
+  readoutDemodFiber.up at SizeMapping(0x20000, 1 << 4) of rfFiber
   readoutDemodFiber.up.setUpConnection(a = StreamPipe.FULL, d = StreamPipe.FULL)
 
   val readoutDecoderFiber = riscqCd(ReadoutDecoderFiber(
@@ -186,7 +191,7 @@ case class RiscqRfWithPulseTableFiber(
     time = time,
     carrier = readoutDemodFiber.dcg.io.carrier,
   ))
-  readoutDecoderFiber.up at SizeMapping(0x40000, 1 << 4) of dMemPortDec
+  readoutDecoderFiber.up at SizeMapping(0x30000, 1 << 4) of rfFiber
   readoutDecoderFiber.up.setUpConnection(a = StreamPipe.FULL, d = StreamPipe.FULL)
 
   // val readoutFiber = riscqCd(ReadoutFiber(
@@ -196,17 +201,17 @@ case class RiscqRfWithPulseTableFiber(
   // readoutFiber.up at SizeMapping(0x30000, 1 << 16) of dMemPortDec
   // readoutFiber.up.setUpConnection(a = StreamPipe.FULL, d = StreamPipe.FULL)
 
-  val pulseMemFiber = hostCd(PulseMemFiber(2, 256, 1024, true, hostCd, dspCd))
+  val pulseMemFiber = hostCd(DualClockRamFiber(2, 256, 1024, hostCd, dspCd, true))
   for(i <- 0 until 2) {
-    pulseMemFiber.pulseMems(i).fastPort.enable := True
-    pulseMemFiber.pulseMems(i).fastPort.write := False
-    pulseMemFiber.pulseMems(i).fastPort.mask.setAllTo(False)
-    pulseMemFiber.pulseMems(i).fastPort.wdata.setAllTo(False)
+    pulseMemFiber.rams(i).fastPort.enable := True
+    pulseMemFiber.rams(i).fastPort.write := False
+    pulseMemFiber.rams(i).fastPort.mask.setAllTo(False)
+    pulseMemFiber.rams(i).fastPort.wdata.setAllTo(False)
   }
-  pulseMemFiber.pulseMems(0).fastPort.address := gateDriveFiber.pg.io.memPort.cmd.payload
-  gateDriveFiber.pg.io.memPort.rsp := pulseMemFiber.pulseMems(0).fastPort.rdata
-  pulseMemFiber.pulseMems(1).fastPort.address := readoutDriverFiber.pg.io.memPort.cmd.payload
-  readoutDriverFiber.pg.io.memPort.rsp := pulseMemFiber.pulseMems(1).fastPort.rdata
+  pulseMemFiber.rams(0).fastPort.address := gateDriveFiber.pg.io.memPort.cmd.payload
+  gateDriveFiber.pg.io.memPort.rsp := pulseMemFiber.rams(0).fastPort.rdata
+  pulseMemFiber.rams(1).fastPort.address := readoutDriverFiber.pg.io.memPort.cmd.payload
+  readoutDriverFiber.pg.io.memPort.rsp := pulseMemFiber.rams(1).fastPort.rdata
 
   val dac = List.fill(2)(ComplexBatch(batchSize = 16, dataWidth = 16))
   val adc = ComplexBatch(batchSize = 4, dataWidth = 16)
@@ -232,17 +237,26 @@ case class PulseTableSoc(
   hostBus.setDownConnection(a = StreamPipe.FULL, d = StreamPipe.FULL)
 
   import RiscqZcu216MemoryMap._
+  val pulseMemWa = WidthAdapter()
+  pulseMemWa.up at SizeMapping(pulseMemOffset, 1 << 25) of hostBus
   val pulseMemBus = Node()
-  pulseMemBus at SizeMapping(pulseMemOffset, 1 << 25) of hostBus
+  pulseMemBus at SizeMapping(0, 1 << 25) of pulseMemWa.down
+  pulseMemBus.setDownConnection(a = StreamPipe.FULL, d = StreamPipe.FULL)
 
   val riscqMemBus = Node()
   riscqMemBus at SizeMapping(riscqCoreMemOffset, 1 << 25) of hostBus
   riscqMemBus.setDownConnection(a = StreamPipe.FULL, d = StreamPipe.FULL)
 
+  val robs = DualClockRamFiber(1, 64, 1024, hostCd, dspCd, withOutReg = true)
+  val robAdapter = tilelink.fabric.WidthAdapter()
+  robAdapter.up at SizeMapping(2 << 25, 1 << 25) of hostBus
+  robs.up at SizeMapping(0, 1 << 25) of robAdapter.down
+  robs.up.setUpConnection(a = StreamPipe.FULL, d = StreamPipe.FULL)
+
   val riscqReset = Bool()
   val riscqCd = ClockDomain(dspCd.readClockWire, riscqReset)
   val riscqArea = new ClockingArea(dspCd) {
-    val refTime = Reg(UInt(64 bit)) init 0
+    val refTime = riscqCd(Reg(UInt(64 bit)) init 0)
     refTime := refTime + 1
 
     val timeOffset = Reg(UInt(64 bit)) init 0
@@ -297,12 +311,39 @@ case class PulseTableSoc(
       }
     }
 
+    val adcs = Vec.fill(16)(Vec.fill(4)(SInt(16 bits)))
+    (adcs zip io.adc).foreach { case (o, i) => o.assignFromBits(i.payload) }
+    val adcBufs = adcs.map { adc => RegNext(adc) }
+
+
+    val adcSum = Vec.tabulate(4) { i => AddTree(adcBufs.map { adc => adc(i) }.toList).sum }
+    // for ((coreId, adcId) <- adcMap) {
+    //   (riscqCores(coreId).adc zip adcBufs(adcId)).foreach { case (o, i) =>
+    //     o.r := i // 1 RegNext is too little, 3 RegNexts are too much
+    //     o.i := o.i.getZero
+    //   }
+    // }
+
     for ((coreId, adcId) <- adcMap) {
-      (riscqCores(coreId).adc zip io.adc(adcId).payload.subdivideIn(16 bits)).foreach { case (o, i) =>
-        o.r.assignFromBits(RegNext(i)) // 1 RegNext is too little, 3 RegNexts are too much
+      (riscqCores(coreId).adc zip adcSum).foreach { case (o, i) =>
+        o.r := i // 1 RegNext is too little, 3 RegNexts are too much
         o.i := o.i.getZero
       }
     }
+
+    val fire = RegNext(riscqCores(0).gateDriveFiber.pg.io.pulse.valid)
+    val rbAddr = Reg(UInt(10 bits)) init 0
+    val rb = robs.rams(0)
+    when(fire) {
+      rbAddr := rbAddr + 1
+    }.otherwise {
+      rbAddr := 0
+    }
+    rb.fastPort.enable := True
+    rb.fastPort.mask.setAllTo(True)
+    rb.fastPort.address := RegNext(rbAddr)
+    rb.fastPort.write := fire
+    rb.fastPort.wdata := adcSum.asBits
   }
 
   val riscqResetHostCd = Bool()
@@ -336,14 +377,34 @@ case class PulseTableSoc(
 
   Fiber build new Area {
     riscqArea.riscqCores(0).dMemPortDec.bus.get.simPublic()
+    riscqArea.riscqCores(0).rfFiber.bus.get.simPublic()
   }
 
 }
 
 object GenPulseTableSoc extends App {
-  val qubitNum = 14
-  val dacMap = (0 until qubitNum).flatMap { i => List(((i, 0), 0), ((i, 1), i + 1 )) }.toMap
-  val adcMap = (0 until qubitNum).map { i => (i, 12) }.toMap
+  val qubitNum = 1
+  val loopbackMap = Map(
+    0 -> 14,
+    // 1 -> 15,
+    // 2 -> 12,
+    // 3 -> 13,
+    // 4 -> 10,
+    // 5 -> 11,
+    // 6 -> 8,
+    // 7 -> 9,
+    // 8 -> 6,
+    // 9 -> 7,
+    // 10 -> 4,
+    // 11 -> 5,
+    // 12 -> 2,
+    // 13 -> 3,
+    // 14 -> 0,
+    // 15 -> 1
+  )
+  // val dacMap = (0 until qubitNum).flatMap { i => List(((i, 0), 0), ((i, 1), i + 1 )) }.toMap
+  val dacMap = (0 until qubitNum).flatMap { i => List(((i, 0), i), ((i, 1), i)) }.toMap
+  val adcMap = (0 until qubitNum).map { i => (i, loopbackMap(i)) }.toMap
   println(s"dacMap: $dacMap")
 
   SpinalConfig(

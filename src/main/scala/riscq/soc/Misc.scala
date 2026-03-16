@@ -222,7 +222,7 @@ case class RFFiber(rfArea: RFArea) extends Area {
 
 case class PulseMemFiber(num: Int, width: Int, depth: Int, withOutReg: Boolean, hostCd: ClockDomain, dspCd: ClockDomain)
     extends Area {
-  val up = Node()
+  val up = hostCd(Node())
   val pulseMems = List.fill(num)(
     DualClockRam(
       width = width,
@@ -244,13 +244,40 @@ case class PulseMemFiber(num: Int, width: Int, depth: Int, withOutReg: Boolean, 
     memPort.mask := writePort.mask
     memPort.wdata := writePort.data
     val pulseMemFiber = TileLinkMemWriteFiber(writePort)
-    val offset = step * i
-    pulseMemFiber.up at offset of up
+    pulseMemFiber.up at SizeMapping(i * step, step) of up
+  }
+}
+
+case class DualClockRamWriteOnlyFiber(num: Int, width: Int, depth: Int, withOutReg: Boolean, hostCd: ClockDomain, dspCd: ClockDomain)
+    extends Area {
+  val up = hostCd(Node())
+  val rams = List.fill(num)(
+    DualClockRam(
+      width = width,
+      depth = depth,
+      slowCd = hostCd,
+      fastCd = dspCd,
+      withOutRegFast = withOutReg,
+      withOutRegSlow = true
+    )
+  )
+
+  val step = 1 << log2Up(depth * width / 8)
+  val writeOnlyFibers = for (i <- 0 until num) yield new ClockingArea(hostCd) {
+    val memPort = rams(i).slowPort
+    val writePort = Flow(MemWriteCmd(memPort.dataType, memPort.addressWidth, memPort.maskWidth))
+    memPort.enable := True
+    memPort.write := writePort.valid
+    memPort.address := writePort.address
+    memPort.mask := writePort.mask
+    memPort.wdata := writePort.data
+    val writeOnlyFiber = TileLinkMemWriteFiber(writePort)
+    writeOnlyFiber.up at SizeMapping(i * step, step) of up
   }
 }
 
 case class ReadoutBufFiber(num: Int, width: Int, depth: Int, hostCd: ClockDomain, dspCd: ClockDomain) extends Area {
-  val up = Node()
+  val up = hostCd(Node())
   val readoutBufs = List.fill(num)(
     DualClockRam(
       width = width,
@@ -264,8 +291,27 @@ case class ReadoutBufFiber(num: Int, width: Int, depth: Int, hostCd: ClockDomain
 
   val step = 1 << log2Up(width * depth / 8)
   val readoutBufFibers = for (i <- 0 until num) yield new Area {
-    val rbTlFiber = TileLinkMemReadWriteFiber(readoutBufs(i).slowPort, withOutReg = true)
-    rbTlFiber.up at i * step of up
+    val rbTlFiber = hostCd(TileLinkMemReadWriteFiber(readoutBufs(i).slowPort, withOutReg = true))
+    rbTlFiber.up at SizeMapping(i * step, step) of up
+  }
+}
+case class DualClockRamFiber(num: Int, width: Int, depth: Int, hostCd: ClockDomain, dspCd: ClockDomain, withOutReg: Boolean = true) extends Area {
+  val up = hostCd(Node())
+  val rams = List.fill(num)(
+    DualClockRam(
+      width = width,
+      depth = depth,
+      slowCd = hostCd,
+      fastCd = dspCd,
+      withOutRegFast = withOutReg,
+      withOutRegSlow = true
+    )
+  )
+
+  val step = 1 << log2Up(width * depth / 8)
+  val ramFibers = for (i <- 0 until num) yield new Area {
+    val ramFiber = hostCd(TileLinkMemReadWriteFiber(rams(i).slowPort, withOutReg = withOutReg))
+    ramFiber.up at SizeMapping(i * step, step) of up
   }
 }
 

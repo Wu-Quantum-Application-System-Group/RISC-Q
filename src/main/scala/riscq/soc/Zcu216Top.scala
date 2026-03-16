@@ -19,6 +19,13 @@ case class RiscqZcu216SocPorts(gtNum: Int = 0) extends Bundle {
   val adc = List.fill(adcNum)(slave port Stream(Bits(4 * 16 bits)))
   val gts = List.fill(gtNum)(GtPins())
 
+  val ledR = out Bool ()
+  ledR := False
+  ledR.allowOverride()
+  val ledB = out Bool ()
+  ledB := False
+  ledB.allowOverride()
+
   riscq.misc.Axi4VivadoHelper.addInference(axi, "S_AXIS")
   adc.zipWithIndex.foreach { case (d, id) =>
     riscq.misc.Axi4StreamVivadoHelper.addStreamInference(d, s"ADC${id}_AXIS")

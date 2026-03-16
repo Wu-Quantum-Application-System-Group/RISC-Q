@@ -47,6 +47,14 @@ case class IbufgdsTestTop() extends Component {
   oreg := ~oreg
 }
 
+case class BUFGCE_DIV(BUFGCE_DIVIDE: Int) extends BlackBox {
+  addGeneric("BUFGCE_DIVIDE", BUFGCE_DIVIDE)
+  val I = in Bool()
+  val CLR = in Bool()
+  val CE = in Bool()
+  val O = out Bool()
+}
+
 case class NoClkModule() extends Component {
   val i = in Bool()
   val o = out Bool()

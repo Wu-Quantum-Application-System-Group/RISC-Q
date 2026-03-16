@@ -141,7 +141,7 @@ object TestMultiCoreSocPulse extends App {
             val dt = if (i == 0) BigInt(1 << 12) else BigInt((1 << 15) - 1)
             val batch = List.fill(batchSize)(dt)
             val dataStr = batch.map { x => ByteHelper.intToBinStr(x, dataWidth) }.reduce { _ ++ _ }
-            dut.riscqArea.riscqCores(coreId).pulseMemFiber.pulseMems(channelId).mem.setBigInt(i, BigInt(dataStr, 2))
+            dut.riscqArea.riscqCores(coreId).pulseMemFiber.rams(channelId).mem.setBigInt(i, BigInt(dataStr, 2))
           }
         }
       }
@@ -209,7 +209,7 @@ object TestPulseTableSocReadout extends App {
             val dt = if (i == 0) BigInt(1 << 12) else BigInt((1 << 15) - 1)
             val batch = List.fill(batchSize)(dt)
             val dataStr = batch.map { x => ByteHelper.intToBinStr(x, dataWidth) }.reduce { _ ++ _ }
-            dut.riscqArea.riscqCores(coreId).pulseMemFiber.pulseMems(channelId).mem.setBigInt(i, BigInt(dataStr, 2))
+            dut.riscqArea.riscqCores(coreId).pulseMemFiber.rams(channelId).mem.setBigInt(i, BigInt(dataStr, 2))
           }
         }
       }
@@ -308,7 +308,7 @@ object TestPulseTableSocVna extends App {
             val dt = if (i == 0) BigInt(1 << 12) else BigInt((1 << 15) - 1)
             val batch = List.fill(batchSize)(dt)
             val dataStr = batch.map { x => ByteHelper.intToBinStr(x, dataWidth) }.reduce { _ ++ _ }
-            dut.riscqArea.riscqCores(coreId).pulseMemFiber.pulseMems(channelId).mem.setBigInt(i, BigInt(dataStr, 2))
+            dut.riscqArea.riscqCores(coreId).pulseMemFiber.rams(channelId).mem.setBigInt(i, BigInt(dataStr, 2))
           }
         }
       }
@@ -370,7 +370,7 @@ object TestPulseTableSocVna extends App {
       //   println("")
       //   tick()
       // }
-      tick(1000)
+      tick(2000)
       for(i <- 0 until 5) {
         val re_comp = dut.riscqArea.riscqCores(0).mem.mem.getBigInt(0x100 / 4 + i * 2)
         val im_comp = dut.riscqArea.riscqCores(0).mem.mem.getBigInt(0x100 / 4 + i * 2 + 1)
@@ -379,6 +379,129 @@ object TestPulseTableSocVna extends App {
         // println(s"res[${i}]: ${re_comp} ${im_comp}")
         // println(s"res[${i}]: ${re} ${im}")
         println(s"res[${i}]: ${re*re + im*im}")
+      }
+    }
+}
+
+object TestPulseTableSocQubic extends App {
+  val qubitNum = 1
+  val dacMap = (0 until qubitNum).flatMap { i => List(((i, 0), i), ((i, 1), i)) }.toMap
+  val adcMap = (0 until qubitNum).map { i => (i, 14) }.toMap
+  val simConfig = SimConfig
+  simConfig.addSimulatorFlag("--x-initial 0")
+  simConfig.addSimulatorFlag("-Wno-MULTIDRIVEN")
+  simConfig
+    .compile {
+      val dut = new PulseTableSoc(qubitNum = qubitNum, dacMap = dacMap, adcMap = adcMap, withTest = true)
+      dut.riscqArea.time.simPublic()
+      dut.riscqArea.riscqCores(0).timeMemMap.timeCmp.simPublic()
+      dut.riscqArea.riscqCores(0).readoutDecoderFiber.rd.io.simPublic()
+      dut.riscqArea.riscqCores(0).readoutDecoderFiber.rd.timer.simPublic()
+      dut.riscqArea.riscqCores(0).readoutDecoderFiber.rd.dur.simPublic()
+      dut.riscqArea.riscqCores(0).readoutDecoderFiber.rd.startTime.simPublic()
+      dut.riscqArea.riscqCores(0).gateDriveFiber.pg.io.simPublic()
+      dut
+    }
+    .doSim { dut =>
+      val driver = new Driver(dut)
+      import driver._
+
+      init()
+
+      import riscq.soc.RiscqZcu216MemoryMap._
+      axi4Driver.write(hostCtrlOffset, List(0x01, 0x00, 0x00, 0x00)) // riscq reset up
+
+      val batchSize = 16
+      val dataWidth = 16
+      for (coreId <- 0 until qubitNum) {
+        for (channelId <- 0 until 2) {
+          for (i <- 0 until 1024) {
+            val dt = if (i == 0) BigInt(1 << 12) else BigInt((1 << 15) - 1)
+            val batch = List.fill(batchSize)(dt)
+            val dataStr = batch.map { x => ByteHelper.intToBinStr(x, dataWidth) }.reduce { _ ++ _ }
+            dut.riscqArea.riscqCores(coreId).pulseMemFiber.rams(channelId).mem.setBigInt(i, BigInt(dataStr, 2))
+          }
+        }
+      }
+      hostCd.waitRisingEdge()
+
+      val elfFile = new File("software-example/debug/build/main.elf")
+      val elf = new Elf(elfFile, addressWidth = 32)
+      for(coreId <- 0 until qubitNum) {
+        elf.load(dut.riscqArea.riscqCores(coreId).mem.mem, -0x80000000)
+      }
+
+      dspCd.assertReset()
+      dspCd.waitRisingEdge()
+      dspCd.deassertReset()
+
+      val adc_id = 14
+      val adcLogic = fork {
+        def freq_ghz(f: Double) = f * math.Pi
+        val freq = freq_ghz(4.7)
+        // f ghz
+        // t + 1 -> time + 2ns -> phase + 2 * f * 2 pi = f * 4 pi
+
+        // t+1 -> phase + 4 * freq * pi
+        // 0.1ghz
+        // 1ns -> phase + 0.1 * 2pi
+        // 2ns -> phase + 0.2 * 2pi = 4 point
+        // 1point -> phase + 0.1 * pi
+        val batchSize = 4
+        val phaseAdc = 0
+        TwosComplementToSigned
+        while (true) {
+          val time = dutTime - 16
+          val adcData = (0 until batchSize).map { i => math.cos((time * batchSize + i).toDouble * freq + phaseAdc) }
+          val adcDataInt = adcData.map { x => SignedToTwosComplement(math.min((x * (1 << 15)).toInt, (1 << 15) - 1), 16) }
+          val adcDataBigInt = adcDataInt.zipWithIndex.map { case (x, i) => (x) << (i * 16) }.reduce { _ + _ }
+          dut.io.adc(adc_id).payload #= adcDataBigInt
+          dspCd.waitSampling()
+        }
+      }
+
+      axi4Driver.write(hostCtrlOffset, List(0x00, 0x00, 0x00, 0x00)) // riscq reset down
+
+      // val monitor = new Monitor(dut.riscqArea.riscqCores(0).riscqFiber.dBus.bus, dspCd)
+      val monitor = new Monitor(dut.riscqArea.riscqCores(0).rfFiber.bus.get, dspCd)
+      monitor.add(new MonitorSubscriber {
+        override def onA(a: TransactionA) = { logTime(); println(a); println(s"timecmp: ${dut.riscqArea.riscqCores(0).timeMemMap.timeCmp.toBigInt}") }
+        override def onD(d: TransactionD) = { logTime(); println(d) }
+      })
+
+
+      // waitUntil(90)
+      // for(j <- 1 until 300) {
+      //   print(s"time: ${dutTime}")
+      //   // print(s"readout valid: ${dut.riscqArea.riscqCores(0).readoutDecoderFiber.rd.io.res.valid.toBoolean}")
+      //   // print(s"readout result: ${dut.riscqArea.riscqCores(0).readoutDecoderFiber.rd.io.res.payload.toBigInt}")
+      //   // print(s"readout valid: ${dut.riscqArea.riscqCores(0).readoutDecoderFiber.rd.dur.valid.toBoolean}")
+      //   // print(s"readout payload: ${dut.riscqArea.riscqCores(0).readoutDecoderFiber.rd.dur.payload.toBigInt}")
+      //   // print(s"readout timer: ${dut.riscqArea.riscqCores(0).readoutDecoderFiber.rd.timer.toBigInt}")
+      //   // print(s"readout startTime: ${dut.riscqArea.riscqCores(0).readoutDecoderFiber.rd.startTime.toBigInt}")
+      //   println("")
+      //   tick()
+      // }
+      tick(2500)
+      println(s"${dut.riscqArea.riscqCores(0).gateDriveFiber.pg.io.pulse.valid.toBoolean}")
+      tick(2500)
+      for(i <- 0 until 10) {
+        val data = dut.robs.rams(0).mem.getBigInt(i)
+        val xs = (0 until 4).map(j => TwosComplementToSigned((data >> (j * 16)) & 0xffff, 16))
+        println(s"rb[${i}]: ${xs.mkString(", ")}")
+      }
+
+      val re_comp = dut.riscqArea.riscqCores(0).mem.mem.getBigInt(0xff4 / 4)
+      val im_comp = dut.riscqArea.riscqCores(0).mem.mem.getBigInt(0xff8 / 4)
+      val re = TwosComplementToSigned(re_comp, 32)
+      val im = TwosComplementToSigned(im_comp, 32)
+      // println(s"res[${i}]: ${re_comp} ${im_comp}")
+      // println(s"res[${i}]: ${re} ${im}")
+      println(s"r ${re} i ${im} res: ${re*re + im*im}")
+      for(i <- 0 until 10) {
+        val data = dut.robs.rams(0).mem.getBigInt(i)
+        val xs = (0 until 4).map(j => TwosComplementToSigned((data >> (j * 16)) & 0xffff, 16))
+        println(s"rb[${i}]: ${xs.mkString(", ")}")
       }
     }
 }

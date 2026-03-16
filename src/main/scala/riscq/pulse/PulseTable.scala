@@ -91,7 +91,7 @@ case class PulseGeneratorWithTableFiber(
     memLatency = memLatency,
     timeInOffset = timeInOffset + 1,
     fifoTimeWidth = fifoTimeWidth,
-    fifoCond = "eq"
+    fifoCond = "geq"
   )
   pg.io.startTime := RegNext(startTime).addAttribute("EQUIVALENT_REGISTER_REMOVAL", "NO")
   pg.io.time := RegNext(time).addAttribute("EQUIVALENT_REGISTER_REMOVAL", "NO")
