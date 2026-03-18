@@ -1,7 +1,7 @@
 [submodule "ext/SpinalHDL"]
 	path = ext/SpinalHDL
 	url = https://github.com/JunyiLiu1994/SpinalHDL
-	branch = dev
+	branch = v1.14.1
 [submodule "ext/SpinalHelios"]
 	path = ext/SpinalHelios
 	url = github:ethanlee515/SpinalHelios
