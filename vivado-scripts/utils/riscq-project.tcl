@@ -12,7 +12,7 @@ global TOP_MODULE
 global PROJ_NAME
 
 global SOURCE_PATH
-set SOURCE_PATH ../rtl
+set SOURCE_PATH ../../rtl
 
 global BUILD_PREFIX
 set BUILD_PREFIX ./
@@ -30,21 +30,25 @@ proc bd {} {
 
     create_bd_design -dir ${BUILD_PREFIX}/bd $BD_NAME
 
+    source ${UTILS_PATH}/clock-interface.tcl
+
     source ${UTILS_PATH}/zynq-ps.tcl
 
     # top module
     global TOP_MODULE
     set TOP [create_bd_cell -type ip -vlnv user.org:user:${TOP_MODULE}:1.0 top]
+    connect_bd_net [get_bd_pins ${CLKIFC}/hostClk] [get_bd_pins ${TOP}/hostClk]
+    connect_bd_net [get_bd_pins ${CLKIFC}/dspClk] [get_bd_pins ${TOP}/dspClk] 
+    # set_property -dict [list CONFIG.FREQ_HZ {500000000}] [get_bd_pins ${TOP}/dspClk]
+    # set_property -dict [list CONFIG.FREQ_HZ {100000000}] [get_bd_pins ${TOP}/hostClk]
 
     source ${UTILS_PATH}/reset-modules.tcl
 
-    source ${UTILS_PATH}/axi-smart-connect.tcl
-
     source ${UTILS_PATH}/gty-connection.tcl
 
-    source ${UTILS_PATH}/clock-interface.tcl
-
     source ${UTILS_PATH}/rfdc.tcl
+
+    source ${UTILS_PATH}/axi-smart-connect.tcl
 
     source ${UTILS_PATH}/led.tcl
 
@@ -120,7 +124,7 @@ proc cb {NAME} {
     build
     global BUILD_PREFIX
     global TOP_MODULE
-    write_hw_platform -fixed -include_bit -force -file ${BUILD_PREFIX}/${TOP_MODULE}.xsa
+    write_hw_platform -fixed -include_bit -force -file ${BUILD_PREFIX}/${NAME}.xsa
     # copy_files
 }
 

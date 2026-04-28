@@ -125,7 +125,8 @@ def connect_clk_rst(dac_tiles, adc_tiles):
         res += f' [get_bd_pins rf_data_converter/m{i}_axis_aclk]'
     res += '\n'
     # res += 'connect_bd_net [get_bd_pins ibufds_hostClk/IBUF_OUT] [get_bd_pins rf_data_converter/s_axi_aclk]\n'
-    res += 'connect_bd_net [get_bd_pins ${CLKIFC}/hostClk] [get_bd_pins rf_data_converter/s_axi_aclk]\n'
+    res += 'connect_bd_net [get_bd_pins ${ZYNQ_PS}/pl_clk0] [get_bd_pins rf_data_converter/s_axi_aclk]\n'
+    res += 'connect_bd_net [get_bd_pins ${ZYNQ_PS}/pl_resetn0] [get_bd_pins rf_data_converter/s_axi_aresetn]\n'
     res += 'connect_bd_net -net rf_data_converter_reset [get_bd_pins dsp_rst/peripheral_aresetn]'
     # for i in dac_tiles:
     for i in range(4):
@@ -134,7 +135,6 @@ def connect_clk_rst(dac_tiles, adc_tiles):
     for i in range(4):
         res += f' [get_bd_pins rf_data_converter/m{i}_axis_aresetn]'
     res += '\n'
-    res += 'connect_bd_net [get_bd_pins ${PS_RST}/peripheral_aresetn] [get_bd_pins rf_data_converter/s_axi_aresetn]\n'
     return res
 
 def rfdc_properties(dac_tiles, adc_tiles):

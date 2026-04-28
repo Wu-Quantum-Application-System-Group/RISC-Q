@@ -386,9 +386,9 @@ connect_bd_intf_net [get_bd_intf_ports sysref_in] [get_bd_intf_pins rf_data_conv
 connect_bd_intf_net [get_bd_intf_ports dac_clk] [get_bd_intf_pins rf_data_converter/dac2_clk]
 connect_bd_intf_net [get_bd_intf_ports adc_clk] [get_bd_intf_pins rf_data_converter/adc2_clk]
 connect_bd_net [get_bd_pins ${CLKIFC}/dspClk] [get_bd_pins rf_data_converter/s0_axis_aclk] [get_bd_pins rf_data_converter/s1_axis_aclk] [get_bd_pins rf_data_converter/s2_axis_aclk] [get_bd_pins rf_data_converter/s3_axis_aclk] [get_bd_pins rf_data_converter/m0_axis_aclk] [get_bd_pins rf_data_converter/m1_axis_aclk] [get_bd_pins rf_data_converter/m2_axis_aclk] [get_bd_pins rf_data_converter/m3_axis_aclk]
-connect_bd_net [get_bd_pins ${CLKIFC}/hostClk] [get_bd_pins rf_data_converter/s_axi_aclk]
+connect_bd_net [get_bd_pins ${ZYNQ_PS}/pl_clk0] [get_bd_pins rf_data_converter/s_axi_aclk]
+connect_bd_net [get_bd_pins ${ZYNQ_PS}/pl_resetn0] [get_bd_pins rf_data_converter/s_axi_aresetn]
 connect_bd_net [get_bd_pins dsp_rst/peripheral_aresetn] [get_bd_pins rf_data_converter/s0_axis_aresetn] [get_bd_pins rf_data_converter/s1_axis_aresetn] [get_bd_pins rf_data_converter/s2_axis_aresetn] [get_bd_pins rf_data_converter/s3_axis_aresetn] [get_bd_pins rf_data_converter/m0_axis_aresetn] [get_bd_pins rf_data_converter/m1_axis_aresetn] [get_bd_pins rf_data_converter/m2_axis_aresetn] [get_bd_pins rf_data_converter/m3_axis_aresetn]
-connect_bd_net [get_bd_pins ${PS_RST}/peripheral_aresetn] [get_bd_pins rf_data_converter/s_axi_aresetn]
 connect_bd_net [get_bd_pins ${CLKIFC}/user_sysref] [get_bd_pins rf_data_converter/user_sysref_adc] [get_bd_pins rf_data_converter/user_sysref_dac] 
 
 # set_property -dict [list CONFIG.FREQ_HZ {625000}] [get_bd_pins rf_data_converter/user_sysref_dac]
