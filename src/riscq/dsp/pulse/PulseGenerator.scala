@@ -16,7 +16,7 @@ case class PulseGeneratorParams(
                                    // vs a register array (true = recover the higher-fmax FIFO).
     queueForFMax: Boolean = false, // TimedQueue FIFO pointers: plain binary (default — fewer control
                                    // sets) vs fmax-tuned gray/empty-tracker (true).
-    queueImpl: TimedQueueImpl = TimedQueueImpl.SrlShadow, // TimedQueue microarchitecture — see
+    queueImpl: TimedQueueImpl = TimedQueueImpl.RegHead, // TimedQueue microarchitecture — see
                                    // [[TimedQueueImpl]] for the congestion/II trade of each option.
     memLatency: Int = 2,  // envelope mem: cmd → rsp cycles
     timeOffset: Int = 0,  // external calibration: adds to every lead time

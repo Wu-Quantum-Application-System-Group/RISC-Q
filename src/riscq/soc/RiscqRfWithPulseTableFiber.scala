@@ -44,7 +44,6 @@ case class RiscqRfWithPulseTableFiber(
     time: UInt,
     batchSize: Int = 16,
     dataWidth: Int = 16,
-    envAddrWidth: Int = 10,
     timeWidth: Int = 32,
     durWidth: Int = 16,
     adcBatch: Int = 4,
@@ -67,6 +66,10 @@ case class RiscqRfWithPulseTableFiber(
     withTestTap: Boolean = false
 ) extends Area {
   val w        = dataWidth
+  // envelope read-port address width = the envelope RAM's own address width (log2Up(envDepth)). Derived,
+  // not a knob: the pulse-table `env` field, the channel `memPort` address, and the RAM address port all
+  // key off this, so an independent value would silently under-address a deeper bank (env_depth > 1024).
+  val envAddrWidth = log2Up(envDepth)
   val envWidth = batchSize * 2 * w          // complex envelope line (512 for N=16, w=16)
   val memLatency = 1 + memOutReg.toInt      // envelope RAM read latency (sync read + out reg)
   // 0x40000-byte RF window: gate 0x00000, readout drive 0x10000, demod 0x20000. The old decoder
