@@ -916,6 +916,99 @@ def test_resonator_scan_folds_past_the_half_rate(responder, socmap):
         f"the folded codes are not the tones' own: {seen[:3]}... vs {want[:3]}..."
 
 
+def _hanger_answer(m, dips, depth=0.6):
+    """A HANGER-coupled cavity for a k_vna IQSUM sweep: S = 1 − depth·Σ L(f), which DIPS at each
+    planted resonance instead of peaking — the notch geometry qcal's rule reads. (`_iqsum_answer`'s
+    cavity is a TRANSMISSION Lorentzian, a peak, and has no dip at all.) The scans below put ~10
+    points across κ: qcal smooths with σ = 3 SAMPLES before it gates, so a notch narrower than that
+    is washed out below its own half-depth threshold and reads as no dip at all."""
+    kappa = units.code_to_freq(KAPPA_CODE, m.params)
+
+    def answer(progs, params):
+        out = {}
+        for q, prog in progs.items():
+            shots, sh = (int(prog.bindings[k]) for k in ("shots", "sh"))
+            f = _vna_freqs(prog, params.get(q), m)
+            s = 1.0 + 0j - depth * sum(_lorentzian(f, d, kappa, 0.0, +1) for d in dips)
+            out[q] = {"out": iq_sum(IQ_SCALE * s, shots, sh)}
+        return out
+    return answer
+
+
+def test_resonator_proposes_the_notch_it_found(responder, socmap):
+    """qcal's dip rule (`Resonator.analyze`, resonator.py:527-556) and the write-back its
+    `Characterize.final` does: smooth the dB trace, keep the local minima at least halfway down from
+    the mean to the deepest point, and — when exactly ONE qualifies — propose it as
+    `readout/{q}/freq`. The planted notch sits 3κ off the tree's stored probe, so recovering it is a
+    real measurement and `apply()` has somewhere to move the Config to."""
+    m = socmap
+    r = responder(CONFIG)
+    cfg = _cfg(m)
+    f_r = float(cfg["readout/0/freq"])
+    kappa = units.code_to_freq(KAPPA_CODE, m.params)
+    dip = f_r + 3 * kappa
+    r.answer(_hanger_answer(m, [dip]))
+    freqs = f_r + np.linspace(-10 * kappa, 10 * kappa, 201)
+
+    res = Resonator(cfg, 0, freqs={0: freqs}, shots=64).run(r.drv)
+    d = res.data[0]
+    step = float(d["x"][1] - d["x"][0])
+    assert not d["fallback"], "a planted notch did not clear qcal's half-depth gate"
+    assert len(d["peaks"]) == 1, f"one resonator in band, {len(d['peaks'])} dips: {d['peaks']}"
+    assert d["notch"] == pytest.approx(dip, abs=2 * step), \
+        f"the fitted notch missed the planted resonance by {(d['notch'] - dip) / kappa:.2f} kappa"
+    assert res.ok and res.oks[0]
+    assert res.proposal == {"readout/0/freq": d["notch"]}
+    res.apply()
+    assert cfg["readout/0/freq"] == pytest.approx(dip, abs=2 * step)
+
+
+def test_resonator_refuses_a_band_holding_two_resonators(responder, socmap):
+    """Two dips in one trace is qcal's "Too many peaks" — it characterizes nothing there, and the
+    reference session's wideband 6.53 → 6.85 GHz scan (eight resonators) is exactly this case. The
+    frequency is not proposed, `apply()` refuses outright, and every qualifying dip comes back in
+    `data[q]["peaks"]` for the caller to read."""
+    m = socmap
+    r = responder(CONFIG)
+    cfg = _cfg(m)
+    f_r = float(cfg["readout/0/freq"])
+    kappa = units.code_to_freq(KAPPA_CODE, m.params)
+    dips = [f_r - 8 * kappa, f_r + 8 * kappa]
+    r.answer(_hanger_answer(m, dips))
+    freqs = f_r + np.linspace(-16 * kappa, 16 * kappa, 321)
+
+    res = Resonator(cfg, 0, freqs={0: freqs}, shots=64).run(r.drv)
+    d = res.data[0]
+    step = float(d["x"][1] - d["x"][0])
+    assert d["peaks"] == pytest.approx(dips, abs=2 * step), \
+        f"the two dips were not both found: {d['peaks']}"
+    assert math.isnan(d["notch"]) and not res.ok and not res.oks[0]
+    assert res.proposal == {}
+    with pytest.raises(RuntimeError):
+        res.apply()
+    assert cfg["readout/0/freq"] == f_r          # nothing moved
+
+
+def test_resonator_does_not_propose_a_transmission_peak(responder, socmap):
+    """The dip rule assumes a hanger notch. Our planted cavity — and `TwoLevelModel`'s, spec 17 §3
+    E6 — is a TRANSMISSION Lorentzian whose |0> response PEAKS, so nothing clears the gate: qcal
+    falls back to the raw magnitude's argmin (here a band edge) and writes it, we report the same
+    number flagged `fallback` and propose nothing (README principle 6)."""
+    m = socmap
+    r = responder(CONFIG)
+    r.answer(_iqsum_answer(m))
+    cfg = _cfg(m)
+    f_r = float(cfg["readout/0/freq"])
+    chi = units.code_to_freq(CHI_CODE, m.params)
+    freqs = f_r + np.linspace(-6 * chi, 6 * chi, 61)
+
+    res = Resonator(cfg, 0, freqs={0: freqs}, shots=64).run(r.drv)
+    d = res.data[0]
+    assert d["fallback"] and len(d["peaks"]) == 0
+    assert d["notch"] == pytest.approx(float(d["x"][int(np.argmin(d["mag"]))]))
+    assert not res.ok and not res.oks[0] and res.proposal == {}
+
+
 # ── §8 heralding: the (count, kept) decode and its denominator ──
 
 def test_heralding_matches_unheralded_on_clean_qubit(responder, socmap):

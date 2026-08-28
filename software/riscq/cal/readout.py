@@ -9,7 +9,8 @@ spec 13 §5):
                        frequencies).
   Resonator          — resonator spectroscopy: the |0> magnitude/phase over an arbitrary frequency
                        list (k_vna IQSUM, the shots summed on-core), the wide scan that FINDS a
-                       resonator. Characterization — it proposes nothing.
+                       resonator. qcal's dip rule scores it and proposes `readout/{q}/freq`; a trace
+                       with no dip, or with several, proposes nothing.
   Fidelity           — readout DRIVE AMPLITUDE (`readout/{q}/amp`, qcal's knob): argmax of the
                        confusion diagonal ½[P(0|0) + P(1|1)] under the FIXED hardware discriminator.
   ReadoutFidelity    — the confusion matrix at the calibrated amplitude, straight from the `res` bit
@@ -41,6 +42,8 @@ from __future__ import annotations
 import math
 
 import numpy as np
+from scipy.ndimage import gaussian_filter1d
+from scipy.signal import find_peaks
 
 from riscq import run as rq
 from riscq.cal import kernels
@@ -498,6 +501,38 @@ class Separation:
                       oks=oks)
 
 
+def _notch(x: np.ndarray, mag: np.ndarray, sigma: float = 3.0):
+    """qcal's resonator DIP rule (`Resonator.analyze`, resonator.py:527-556), step for step: smooth
+    the dB trace, keep the local minima that fall at least HALFWAY from the trace's mean to its
+    deepest point, and read the one that qualifies. The gate is computed on the RAW dB (its mean and
+    its minimum) and the search runs on the SMOOTHED curve, as qcal does.
+
+      exactly 1 -> that frequency: the fitted notch;
+      0         -> the raw magnitude's argmin, qcal's fallback, flagged (`fallback=True`);
+      >= 2      -> nan: qcal raises "Too many peaks" here and characterizes nothing. A scan across a
+                   whole readout band lands here by construction — the caller gets every qualifying
+                   dip back instead of one wrong answer.
+
+    `sigma` is qcal's, and it is in SAMPLES: a notch only a few points wide is smoothed below its
+    own half-depth gate and reads as NO dip, so a scan has to resolve the resonance (a handful of
+    points across κ) before the rule can find it.
+
+    NOTCH geometry: this reads a hanger-coupled resonator, whose |S21| dips on resonance. A
+    transmission-coupled one (our planted cavity, and `TwoLevelModel`'s — spec 17 §3 E6) answers
+    with a PEAK, no dip clears the gate, and the fallback then reports a band edge — which is why
+    the fallback is reported rather than proposed.
+
+    Returns (freq_hz, the qualifying dips' frequencies, fallback?)."""
+    db = 20 * np.log10(mag)
+    threshold = db.mean() + (db.min() - db.mean()) / 2
+    peaks, _ = find_peaks(-gaussian_filter1d(db, sigma), height=-threshold)
+    if len(peaks) == 1:
+        return float(x[peaks[0]]), x[peaks], False
+    if len(peaks) == 0:
+        return float(x[int(np.argmin(mag))]), x[peaks], True
+    return math.nan, x[peaks], False
+
+
 class Resonator:
     """RESONATOR SPECTROSCOPY (qcal's `Resonator`, spec 20 §8): the |0> readout response over an
     arbitrary frequency list — the wide scan you run to FIND a resonator, before anything about the
@@ -516,16 +551,31 @@ class Resonator:
     wrap is the same Nyquist fold the converter does, so the band above 4 GHz is scanned through its
     alias, as `vna.ipynb` scans the full zone. Only a scan wider than one whole turn fails loud.
 
-    Like `Punchout` it PROPOSES NOTHING and writes nothing: `data[q]` carries the mean IQ, its
-    magnitude and the realized frequency axis, and the caller picks the extremum — qcal reads a DIP
-    (`analyze` runs `find_peaks` on the smoothed −dB, falling back to `argmin`), which is the notch
-    geometry of a hanger-coupled resonator; a transmission-coupled one answers with a peak. Since
-    nothing is written there is also nothing to restore afterwards (the reference cell saves and
-    puts back the readout params + `reset/passive/delay` it swept under).
+    `data[q]` carries the mean IQ, its magnitude and the realized frequency axis; on top of that the
+    class runs qcal's own dip rule (`_notch`) and PROPOSES `readout/{q}/freq` from it, per qubit —
+    qcal writes that value too (`Resonator.final` → `Characterize.final`, characterize.py:126-137),
+    which is exactly what the reference cell's save/restore block around its second scan undoes.
+    Two branches deviate, both toward refusing (README principle 6):
+
+      * `>= 2` qualifying dips — no proposal, as qcal's "Too many peaks" characterizes nothing. The
+        wideband scan over a whole readout band is this case by construction, and
+        `data[q]["peaks"]` carries every dip it found. The reference session's own log shows the
+        same verdict: one `readout/{q}/freq` write out of seven on its ± 25 MHz scan, none at all
+        on the wideband one.
+      * `0` qualifying dips — qcal falls back to the raw magnitude's argmin AND writes it. The same
+        number comes back in `data[q]["notch"]` with `data[q]["fallback"] = True`, but it is not
+        proposed: a trace with no notch in it is a resonator that left the span (or a transmission
+        cavity, spec 17 §3 E6), not a measurement of one.
+
+    The answer is a STARTING POINT, not the final probe frequency: `Separation` sweeps around it for
+    the max-separation frequency, which on a dispersive readout is a different point (spec 13 §5).
 
     The per-shot idle head is the Config's `reset/relax` like every other cal — but this sweep never
-    excites the qubit, so it needs resonator ring-down, not T1: shorten `reset/relax` on the loaded
-    tree (nothing saves it back) when the scan is long."""
+    excites the qubit, so what it waits for is resonator ring-down, not T1: shorten `reset/relax` on
+    the loaded tree (nothing saves it back). The X6Y3 notebook uses 10 us, that tree's own
+    `readout/resonator_reset` — the gap qcal leaves after the herald probe for the cavity to empty.
+    The reference session did NOT shorten its head: it paid the full 500 us T1 relax on a |0>-only
+    sweep, 1081 s for the 1000-point scan."""
 
     def __init__(self, cfg, qubits, freqs, shots=64):
         self.cfg, self.qubits = cfg, qubits_list(qubits)
@@ -566,17 +616,25 @@ class Resonator:
             timeout = max(timeout, batch_timeout(npts * shots * period))
         out = rq.run(drv, m, progs, results=["out"], timeout=timeout)
 
-        data, fit = {}, {}
+        data, fit, proposal, oks = {}, {}, {}, {}
         for q in self.qubits:
             f0, c0, xs = meta[q]
             z = out[q]["out"].astype(float).reshape(-1, 2) * (1 << sh) / shots   # mean IQ per point
             iq = z[:, 0] + 1j * z[:, 1]
             # DELTA-based physical Hz, as in Separation: the swept codes alias, so report the
             # caller's own band rather than the baseband image of the folded code.
-            data[q] = {"x": f0 + units.code_to_freq(xs - c0, m.params), "iq": iq, "mag": np.abs(iq)}
-            fit[q] = None
+            x = f0 + units.code_to_freq(xs - c0, m.params)
+            mag = np.abs(iq)
+            notch, peaks, fallback = _notch(x, mag)              # qcal's dip rule
+            data[q] = {"x": x, "iq": iq, "mag": mag,
+                       "notch": notch, "peaks": peaks, "fallback": fallback}
+            fit[q] = None                                        # a search, not a curve fit
+            oks[q] = bool(np.isfinite(notch) and not fallback)   # one dip cleared the gate
+            if oks[q]:
+                proposal[f"readout/{q}/freq"] = notch
         self.data, self.fit = data, fit
-        return Result(True, data, fit, {}, cfg, f"Resonator {self.qubits}")
+        return Result(all(oks.values()), data, fit, proposal, cfg, f"Resonator {self.qubits}",
+                      oks=oks)
 
 
 class Punchout:
