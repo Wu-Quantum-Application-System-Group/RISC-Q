@@ -93,7 +93,7 @@ object PulseTableSocCpuSim extends App {
       axi.write(BigInt(dut.map.coreMemOffset(core)) + word.toLong * 4, leBytes(v, 4))
     val gateEnvBytes = (N / gateInterp) * 2 * w / 8                 // bytes per interpolated gate line (16)
     def loadEnv(core: Int, a: Int, word: BigInt): Unit = {
-      val wordAddr = BigInt(dut.map.pulseMemOffset(core)) + a.toLong * gateEnvBytes
+      val wordAddr = BigInt(dut.map.envOffset(core, 0)) + a.toLong * gateEnvBytes
       for (lane <- 0 until gateEnvBytes / 4) axi.write(wordAddr + lane * 4, leBytes(word >> (lane * 32), 4))
     }
     // core-0 runs the pulse-scheduling program; core-1 self-loops; core-0 gate envelope over [base,base+dur) ⊂ [0,64).

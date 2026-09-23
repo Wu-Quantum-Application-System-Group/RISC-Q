@@ -46,18 +46,43 @@ import numpy as np
 import pytest
 
 from riscq import run as rq
-from riscq.cal import JAZZ, ClassifierN, Config, EFPhase, cz_drive_table, cz_table, kernels
-from riscq.cal.base import (GATE_CH, GATE_ENV, SEP, batch_timeout, ef_pulse, ef_table, ef_vz,
-                            gate_pulse, gate_sigma, grid_period, qubit_freq, readout_tables,
-                            relax_batches, train_step, x90_vz)
-from riscq.cal.readout import _rawiq_prog
-from riscq.cal.twoqubit import _cz_dur_batches, _cz_freq_word, _cz_pulse, _sandwich_binds
-from riscq.lang import Array, ParamTable, compile_kernel
+from riscq.cal import JAZZ, ClassifierN, Config, CZSweep, EFPhase, SpectatorPhase
+from riscq.cal.axes import Axis, Param
+from riscq.cal.base import GATE_CH, GATE_ENV, SEP, gate_pulse, gate_sigma
+from riscq.cal.cz import _cz_dur_batches, _cz_pulse, cz_sandwich
+from riscq.cal.experiment import Experiment
+from riscq.cal.gates import resolve
+from riscq.cal.measure import Measure
+from riscq.cal.sequence import Cond, Gate, Idle
 from riscq.map import LEAD, SocMap, SocParams, pack16
 from riscq.pulses import Pulse, units
 from tests.probe import Probe, rabi_for, sigma_z
 
 SIM2Q1C = Path(__file__).resolve().parents[1] / "configs" / "sim-2q1c.json"
+
+
+def ef_pulse(cfg, q, m, name="x90"):
+    """The Config's own EF gate pulse (was `base.ef_pulse`): the resolver's, baseband."""
+    return resolve(cfg, q, f"EF/{name}", m).pulse
+
+
+PREP = Param("prep", (0, 1))
+NCAP_RUN = 4000       # a rerun of an already-loaded image: boot-free, one grid period
+NCAP_RUN2 = 34000     # a full class run on 2 cores: boot + 2 images over AXI + the shot
+NCAP_RUN3 = 46000     # ... and on 3
+TIMEOUT = 2_000_000
+
+
+def probe_progs(cosim, cfg, keys, seqs, axes=None, shots=1, measure=None, params=(),
+                label="probe"):
+    """The production programs for a `Probe`: the real `Experiment` compile path (sequence
+    compiler → `k_batched` → `rq.setup`), returning `{core: Program}`. The probe then reruns them
+    with its own runtime words — `x0`/`dx0` for the on-core axis, `r0..r3` for the Params."""
+    drv, m = cosim
+    axes = axes or {q: () for q in keys}
+    exp = Experiment(cfg, keys, seqs, axes, params, measure or Measure.counts(), shots, label=label)
+    progs, _, _ = exp.compile(drv)
+    return progs
 
 F_GE = 50e6                       # planted qubit frequency (DAC freq code 2048)
 # EF cal: GE and EF carriers a full demod-null (4096 codes) apart so the ThreeLevelModel picks the
@@ -155,7 +180,7 @@ def _ro_cfg(m, qubits, code, x90_amp=0.5):
 
 
 @pytest.mark.cosim
-@pytest.mark.batch_cap(24_000)
+@pytest.mark.batch_cap(40_000)
 def test_cross_core_shot_alignment(cosim_2q1c):
     """L2 — ONE run drives TWO cores, and each core's own qubit responds to its OWN gate DAC and is
     read back out of the SHARED, frequency-multiplexed readout.
@@ -163,8 +188,8 @@ def test_cross_core_shot_alignment(cosim_2q1c):
     FLOOR: ~22 k = 2 core images (~10 k each over AXI) + 2 reruns. A cross-core claim needs one
     image per core by definition; the module docstring's table has the full accounting.
 
-    Two production `_rawiq_prog` images (one per core) are loaded once and run together under the
-    SAME `prep = 1`. The two models are planted with DIFFERENT rates — `rabi_for` π/2 per X90 on
+    Two production raw-capture images (one per core, through `Experiment`) are loaded once and run
+    together under the SAME `prep = 1`. The two models are planted with DIFFERENT rates — `rabi_for` π/2 per X90 on
     core 0, so its two-X90 prep is an exact π, and 0 on core 1 — so one stimulus must produce two
     DIFFERENT textbook states in one run. Both halves are asserted:
 
@@ -184,7 +209,9 @@ def test_cross_core_shot_alignment(cosim_2q1c):
     _, m = cosim_2q1c
     code = RO_CODES                                            # distinct demod codes → freq-multiplexed
     cfg = _ro_cfg(m, (0, 1), code)
-    progs = {q: _rawiq_prog(m, cfg, q, "X90", 1)[0] for q in (0, 1)}
+    progs = probe_progs(cosim_2q1c, cfg, [0, 1],
+                        {q: [Cond(PREP, [Gate("x90"), Gate("x90")])] for q in (0, 1)},
+                        measure=Measure.raw(host=False), params=(PREP,), label="rawiq")
     turn = {0: math.pi / 2, 1: 0.0}                            # core 0 an exact π/2 per X90; core 1 nothing
 
     def spec(scale):
@@ -195,7 +222,7 @@ def test_cross_core_shot_alignment(cosim_2q1c):
              "rabi_rad_per_amp": scale * rabi_for(m, gate_pulse(cfg, q, m), F_GE, turn[q])}
             for q in (0, 1)]}
 
-    params = {q: {"prep": 1} for q in (0, 1)}                  # the SAME prep on both cores
+    params = {q: {"r0": 1} for q in (0, 1)}                    # the SAME prep on both cores
     p = Probe(cosim_2q1c, progs)
     ref = p.iq(spec(0.0), params)                              # every gate a no-op ⇒ both qubits |0⟩
     z = p.iq(spec(1.0), params)
@@ -242,12 +269,14 @@ def test_three_level_clusters_separate(cosim_2q1c):
     _, m = cosim_2q1c
     q, code = 0, RO_CODES[0]
     cfg = _ro_cfg(m, (q,), RO_CODES)
-    prog, _ = _rawiq_prog(m, cfg, q, "X90", 1)
-    p = Probe(cosim_2q1c, {q: prog})
+    progs = probe_progs(cosim_2q1c, cfg, [q],
+                        {q: [Cond(PREP, [Gate("x90"), Gate("x90")])]},
+                        measure=Measure.raw(host=False), params=(PREP,), label="rawiq")
+    p = Probe(cosim_2q1c, progs)
 
     z = [p.iq({"kind": "threelevel", "core": q, "readout_code": code, "readout_amp": 18000.0,
                "readout_phase": 0.0, "level_phases": list(LEVEL_PHASES), "init_level": level,
-               "collapse": False, "noise_scale": 0.0}, {q: {"prep": 0}})[q][0]
+               "collapse": False, "noise_scale": 0.0}, {q: {"r0": 0}})[q][0]
          for level in range(3)]
     mag = [abs(v) for v in z]
     rel = [float(np.angle(v / z[0])) for v in z]
@@ -297,32 +326,21 @@ def _ef_spec(m, cfg, q, rabi_ef, f_ef=EF_F_EF):
 
 @pytest.mark.cosim
 def test_ef_drive_carriers_in_rtl(cosim_2q1c):
-    """L1 — the mid-shot freq switch (spec 01 §4.1): capture the gate DAC across one k_ef_rabi shot and
-    prove the RTL retunes the ONE gate NCO between segments — the GE pi prep comes out at f_GE (2 X90s)
+    """L1 — the mid-shot freq switch (spec 01 §4.1): capture the gate DAC across one EF-amplitude
+    shot and prove the RTL retunes the ONE gate NCO between segments — the GE pi prep comes out at f_GE (2 X90s)
     and the EF drive at f_EF, each at the programmed amplitude. This is the bit-exact readback under the
     novel per-shot double set_freq (the drive whose end-to-end effect the EF probes below assert)."""
     drv, m = cosim_2q1c
     q = 0
     cfg = _ef_cfg(m, q)
     drv.sim.set_model({"kind": "zero"})
-    table, ge_freq, ef_freq = ef_table(cfg, q, m)
-    ro, demod, code, dur, ddly = readout_tables(cfg, q, m)
-    ge = table.pulses["x90"].dur_batches(m, GATE_CH)
-    ef = table.pulses["ef"].dur_batches(m, GATE_CH)
-    period = grid_period(relax_batches(cfg, m), SEP + ef + LEAD + 2 * ge, dur, ddly)
-    prog = compile_kernel(kernels.k_ef_rabi, m, tables=dict(gate=table, ro=ro, demod=demod),
-                          out=Array(2), npts=1, shots=1, period=period, ngates=1, step=ef,
-                          code=code, ddly=ddly,
-                          ge_freq=ge_freq, ef_freq=ef_freq, **x90_vz(cfg, q), **ef_vz(cfg, q))
-    rq.setup(drv, m, {0: prog})
-    rq.check_magic(drv, m, 0, prog)
-    rq.write_var(drv, m, 0, prog, "__rq_status", 0)
-    rq.write_params(drv, m, 0, prog, {"a0q": int(units._amp_code(0.5)) << 16, "daq": 0})
-    ncap = BOOT_NCAP + 2 * period                            # boot + preamble, then the shot's grid slot
-    handle = drv.sim.dac_capture_arm(m.gate_dac(0), ncap)    # armed before release
-    rq.reset(drv, m, on=False)
-    rq.poll_done(drv, m, 0, prog, timeout=batch_timeout(period))
-    rq.reset(drv, m, on=True)
+    ge = resolve(cfg, q, "x90", m).dur
+    ef = resolve(cfg, q, "EF/x90", m).dur
+    ax = Axis.amp(0.5, 0.5, 1)                               # one point, at the same 0.5 as before
+    seq = [Gate("x90"), Gate("x90"), Gate("EF/x90", amp=ax)]
+    progs = probe_progs(cosim_2q1c, cfg, [q], {q: seq}, {q: (ax,)}, label="efcarr")
+    handle = drv.sim.dac_capture_arm(m.gate_dac(0), NCAP_RUN)   # armed before the rerun
+    rq.rerun(drv, m, progs, params={q: {"x0": ax.x0, "dx0": 0}}, results=["out"], timeout=TIMEOUT)
     t0, cap = drv.sim.dac_capture_get(handle)
 
     active = cap.any(axis=1)
@@ -331,7 +349,7 @@ def test_ef_drive_carriers_in_rtl(cosim_2q1c):
     wins = [(s, e) for s, e in zip(starts, ends)]
     ge_code = units._freq_code(EF_F_GE, m.params)
     ef_code = units._freq_code(EF_F_EF, m.params)
-    print(f"\n[ef-carriers] period={period} ncap={ncap} "
+    print(f"\n[ef-carriers] ge={ge} ef={ef} "
           f"windows={[(s, e - s + 1, _carrier_code(cap[s:e + 1])) for s, e in wins]}")
     assert len(wins) == 2, f"expected GE-prep + EF windows, got {len(wins)}"
     (gs, gee), (es, ee) = wins
@@ -346,7 +364,7 @@ def test_ef_amplitude_recovers_the_ef_rabi(cosim_2q1c):
     """L2 (spec 01 §4.1 / Q1) — what the EF amplitude sweep MEASURES: the swept EF drive really
     rotates {|1>, |2>}, by an angle exactly linear in the swept amplitude code.
 
-    `k_ef_rabi`'s on-core Q16 sweep writes the code raw and the drive integral σ is linear in it, so
+    The on-core Q16 amplitude sweep writes the code raw and the drive integral σ is linear in it, so
     a code k·A rotates by k·θ(A). Plant the rate that makes code A an exact EF X90 (`gate_sigma` at
     that code — the `probe.rabi_for` idiom) after a GE-π prep, and the rungs are the textbook
     quarter, half and full turns INSIDE the EF subspace, |0> untouched throughout:
@@ -370,21 +388,15 @@ def test_ef_amplitude_recovers_the_ef_rabi(cosim_2q1c):
     a0 = efp.amp_code()                                   # 0.2 · AMP_SCALE — never hand-written
     rabi_ef = (math.pi / 2) / gate_sigma(m, efp, EF_F_EF, a0)     # code a0 = an exact EF X90
 
-    table, ge_freq, ef_freq = ef_table(cfg, q, m)
-    ro, demod, code, dur, ddly = readout_tables(cfg, q, m, phase=0.0)
-    ge = table.pulses["x90"].dur_batches(m, GATE_CH)
-    ef = table.pulses["ef"].dur_batches(m, GATE_CH)
-    period = grid_period(relax_batches(cfg, m), SEP + ef + LEAD + 2 * ge, dur, ddly)
-    prog = compile_kernel(kernels.k_ef_rabi, m, tables=dict(gate=table, ro=ro, demod=demod),
-                          out=Array(2), npts=1, shots=1, period=period, ngates=1,
-                          step=train_step(ef), code=code, ddly=ddly, daq=0,
-                          ge_freq=ge_freq, ef_freq=ef_freq, **x90_vz(cfg, q), **ef_vz(cfg, q))
+    ax = Axis.amp(float(a0) / units.AMP_SCALE, float(a0) / units.AMP_SCALE, 1)
+    seq = [Gate("x90"), Gate("x90"), Gate("EF/x90", amp=ax)]
+    progs = probe_progs(cosim_2q1c, cfg, [q], {q: seq}, {q: (ax,)}, label="efamp")
     spec = _ef_spec(m, cfg, q, rabi_ef)
-    p = Probe(cosim_2q1c, {q: prog})
+    p = Probe(cosim_2q1c, progs)
 
     for k in (1, 2, 4):
         assert k * a0 <= units.AMP_SCALE, "the swept code must stay on scale"
-        pops = p.state(spec, {q: {"a0q": (k * a0) << 16}})["populations"]
+        pops = p.state(spec, {q: {"x0": (k * a0) << 16}})["populations"]
         theta = rabi_ef * gate_sigma(m, efp, EF_F_EF, k * a0)     # exact by construction
         want = [0.0, math.cos(theta / 2) ** 2, math.sin(theta / 2) ** 2]
         print(f"\n[ef-amp k={k}] code={k * a0} theta={theta:.4f} pops={np.round(pops, 4).tolist()} "
@@ -438,22 +450,16 @@ def test_ef_frequency_recovers_the_ef_detuning(cosim_2q1c, d0_code):
     efp = ef_pulse(cfg, q, m)
     rabi_ef = (math.pi / 2) / gate_sigma(m, efp, detuned, efp.amp_code())    # exact EF X90s
 
-    table, ge_freq, ef_freq = ef_table(cfg, q, m)
-    ro, demod, code, dur, ddly = readout_tables(cfg, q, m, phase=0.0)
-    ge = table.pulses["x90"].dur_batches(m, GATE_CH)
-    ef = table.pulses["ef"].dur_batches(m, GATE_CH)
+    ef = resolve(cfg, q, "EF/x90", m).dur
     waits = (7, 16, 33)                                  # phi ~ 0.74, 1.56, 3.13 rad at |delta| = 60
-    period = grid_period(relax_batches(cfg, m),
-                         SEP + 2 * ef + max(waits) + LEAD + 2 * ge, dur, ddly)
-    prog = compile_kernel(kernels.k_ef_ramsey, m, tables=dict(gate=table, ro=ro, demod=demod),
-                          out=Array(2), npts=1, shots=1, period=period, code=code, ddly=ddly,
-                          ge_freq=ge_freq, ef_freq=ef_freq, dw=0, p0=0, dp=0,
-                          **x90_vz(cfg, q), **ef_vz(cfg, q))
+    ax = Axis.wait_batches(max(waits), 0, 1, m)          # one point; the probe rewrites x0 per wait
+    seq = [Gate("x90"), Gate("x90"), Gate("EF/x90"), Idle(ax), Gate("EF/x90")]
+    progs = probe_progs(cosim_2q1c, cfg, [q], {q: seq}, {q: (ax,)}, label="efram")
     spec = _ef_spec(m, cfg, q, rabi_ef)                  # the model's f_ef is the TRUE one
-    p = Probe(cosim_2q1c, {q: prog})
+    p = Probe(cosim_2q1c, progs)
 
     for w in waits:
-        pops = p.state(spec, {q: {"w0": w}})["populations"]
+        pops = p.state(spec, {q: {"x0": w}})["populations"]
         phi = 2 * math.pi * d0_code * (w + ef) / (1 << 12)
         want = [0.0, (1 - math.cos(phi)) / 2, (1 + math.cos(phi)) / 2]
         print(f"\n[ef-freq d={d0_code:+d} dt={w + ef}] phi={phi:+.4f} pops={np.round(pops, 4).tolist()} "
@@ -486,9 +492,9 @@ def _levels_iq(P, shots):
 
 
 def test_ef_phase_writes_the_vz_pair(responder):
-    """L0 (spec 04 §5 / X4) — the EF keys land: one `EFPhase` run on this file's EF Config drives the
-    `k_ef_phase` program end-to-end (GE π prep → retune to f_EF → the two Rz(±π/2)-decorated
-    3-EF-X90 sequences → RAW P(|2>) through the 3-level classifier) and writes
+    """L0 (spec 04 §5 / X4) — the EF keys land: one `EFPhase` run on this file's EF Config drives
+    both circuits end-to-end (GE π prep → retune to f_EF → the two Rz(±π/2)-decorated 3-EF-X90
+    sequences → RAW P(|2>) through the 3-level classifier) and writes
     `qubit/0/EF/x90/vz` as ONE crossing in BOTH slots.
 
     Host-pure through the shared `responder` (01 §2.2): the real two-sequence `compile_kernel`, the
@@ -506,20 +512,18 @@ def test_ef_phase_writes_the_vz_pair(responder):
     RTL frame slip of the GE→EF retune — which conjugates out of a z-basis population (the kernel
     docstring) and so was never observable in these counts at all; the honest home for the retune's
     effect on the state is the L2 EF probes above."""
-    from riscq.cal.qubit import _phase_sweep
-
     m = SocMap(SocParams.load(SIM2Q1C))
     q, points, shots, span = 0, 7, 24, 0.4
     cfg = _ef_cfg(m, q)
-    x = _phase_sweep(-span, span, points)[2]                 # the class's own axis
+    x = Axis.phase(-span, span, points).values               # the class's own axis
     r = responder(SIM2Q1C)
     runs = []
 
     @r.answer
     def _(progs, params):
-        seq = progs[q].bindings["seq"]
+        seq = len(r.setups)                                  # one setup per circuit, in order
         runs.append(seq)
-        slope = -1.0 if seq == kernels.Y180_X90 else +1.0
+        slope = -1.0 if seq == 1 else +1.0                   # Y180_X90 first, then X180_Y90
         return {q: {"out": _levels_iq(0.5 * (1 + slope * np.sin(x)), shots)}}   # phi* = 0
 
     cal = EFPhase(cfg, q, _ef_clf(), points=points, span=span, shots=shots)
@@ -528,7 +532,7 @@ def test_ef_phase_writes_the_vz_pair(responder):
           f"proposal={res.proposal.get(f'qubit/{q}/EF/x90/vz')}")
 
     assert res.ok and not cal.fallback[q], "the EF line crossing failed"
-    assert runs == [kernels.Y180_X90, kernels.X180_Y90], "both qcal sequences must compile and run"
+    assert runs == [1, 2], "both qcal sequences must compile and run, in order"
     assert len(r.setups) == 2, "one compile + setup per sequence"
     v = res.proposal[f"qubit/{q}/EF/x90/vz"]
     assert v[0] == v[1] == cal.recovered_vz[q]               # ONE crossing, BOTH slots
@@ -569,24 +573,14 @@ def test_ef_phase_x_gate_recovers_the_planted_axis(cosim_2q1c, planted):
 
     efp = ef_pulse(cfg, q, m)
     rabi_ef = (math.pi / 2) / gate_sigma(m, efp, EF_F_EF, efp.amp_code())
-    table, ge_freq, ef_freq = ef_table(cfg, q, m)
-    efx = ef_pulse(cfg, q, m, "x")
-    table.pulses["efx"] = Pulse(efx.env, amp=efx.amp)     # the class's own build: axis from the frame
-    ro, demod, code, dur, ddly = readout_tables(cfg, q, m, phase=0.0)
-    ge = table.pulses["x90"].dur_batches(m, GATE_CH)
-    ef = table.pulses["ef"].dur_batches(m, GATE_CH)
-    xd = table.pulses["efx"].dur_batches(m, GATE_CH)
-    period = grid_period(relax_batches(cfg, m), SEP + 2 * ef + xd + LEAD + 2 * ge, dur, ddly)
-    prog = compile_kernel(kernels.k_ef_phase, m, tables=dict(gate=table, ro=ro, demod=demod),
-                          out=Array(2), npts=1, shots=1, period=period, code=code, ddly=ddly,
-                          ge_freq=ge_freq, ef_freq=ef_freq, seq=kernels.X90_X_X90,
-                          hpi=pack16(units._phase_code(math.pi / 2)), dp=0,
-                          **x90_vz(cfg, q), **ef_vz(cfg, q))
+    ax = Axis.phase(0.0, 0.0, 1)                          # one point; the probe rewrites x0 per δ
+    seq = [Gate("x90"), Gate("x90"), Gate("EF/x90"), Gate("EF/x", phase=ax), Gate("EF/x90")]
+    progs = probe_progs(cosim_2q1c, cfg, [q], {q: seq}, {q: (ax,)}, label="efphase")
     spec = _ef_spec(m, cfg, q, rabi_ef)
-    p = Probe(cosim_2q1c, {q: prog})
+    p = Probe(cosim_2q1c, progs)
 
     for d in (0.0, math.pi / 4, math.pi / 2):
-        pops = p.state(spec, {q: {"p0": pack16(units._phase_code(planted + d))}})["populations"]
+        pops = p.state(spec, {q: {"x0": pack16(units._phase_code(planted + d))}})["populations"]
         want = [0.0, math.cos(d) ** 2, math.sin(d) ** 2]
         print(f"\n[ef-phase-X planted={planted:+.2f} delta={d:+.4f}] pops={np.round(pops, 4).tolist()} "
               f"want={np.round(want, 4).tolist()}")
@@ -693,7 +687,7 @@ def _abs_window(drv, dac, handle):
 
 
 @pytest.mark.cosim
-@pytest.mark.batch_cap(34_000)
+@pytest.mark.batch_cap(52_000)
 def test_cz_3core_drives_coupler_at_fcz_aligned(cosim_2q1c):
     """FLOOR: ~31 k = 3 core images (~10 k each over AXI) + one sized capture. The claim is a
     3-core lock-step alignment, so all three images are the claim; the module docstring's table has
@@ -714,39 +708,14 @@ def test_cz_3core_drives_coupler_at_fcz_aligned(cosim_2q1c):
     cfg, _ = _cz_cfg(m)
     drv.sim.set_model({"kind": "zero"})
     czd = _cz_dur_batches(cfg, (0, 1), m)
-    ro0, demod0, code0, dur0, ddly0 = readout_tables(cfg, 0, m)
     xd = gate_pulse(cfg, 0, m).dur_batches(m, GATE_CH)
-    period = grid_period(relax_batches(cfg, m), 2 * xd + czd, dur0, ddly0)
-    progs = {}
-    for q in (0, 1):                                          # both qubit cores prep |11>
-        gate = ParamTable(GATE_CH, qubit_freq(cfg, q), {"x90": gate_pulse(cfg, q, m)})
-        ro, demod, cd, dur, ddly = readout_tables(cfg, q, m)
-        progs[q] = compile_kernel(kernels.k_cz_pop, m, tables=dict(gate=gate, ro=ro, demod=demod),
-                                  out=Array(1), npts=1, shots=1, period=period, code=cd, ddly=ddly,
-                                  role=kernels.CONTROL, knob=kernels.FREQ,
-                                  form=kernels.COUPLER_FORM, xd=xd, czmax=czd, fcz=0,
-                                  fef=0, sw=0, tail=0, x0=0, dx=0, **x90_vz(cfg, q))
-    czt = cz_table(cfg, (0, 1), m, czd)                       # coupler: CZ drive at f_CZ
-    progs[2] = compile_kernel(kernels.k_cz_pop, m, tables=dict(gate=czt, ro=ro0, demod=demod0),
-                              out=Array(1), npts=1, shots=1, period=period, code=code0, ddly=ddly0,
-                              role=kernels.COUPLER, knob=kernels.FREQ,
-                              form=kernels.COUPLER_FORM, xd=xd, czmax=czd, fcz=0,
-                              fef=0, sw=0, tail=0,
-                              x0=int(units._freq_code(F_CZ, m.params)) << 16, dx=0, **x90_vz(cfg, 0))
-    rq.setup(drv, m, progs)
-    for c in (0, 1, 2):
-        rq.check_magic(drv, m, c, progs[c]); rq.write_var(drv, m, c, progs[c], "__rq_status", 0)
-    ncap = BOOT_NCAP + 2 * period                             # sized: boot + preamble, then the shot
-    caps = {d: drv.sim.dac_capture_arm(d, ncap) for d in (0, 3, 2)}   # control gate, coupler, readout
-    rq.reset(drv, m, on=False)
-    for c in (0, 1, 2):
-        rq.poll_done(drv, m, c, progs[c], timeout=batch_timeout(period))
-    rq.reset(drv, m, on=True)
+    caps = {d: drv.sim.dac_capture_arm(d, NCAP_RUN3) for d in (0, 3, 2)}  # control gate, coupler, readout
+    CZSweep(cfg, (0, 1), "freq", span=0.0, points=1, shots=1).run(drv)
     prep = _abs_window(drv, 0, caps[0])
     cz = _abs_window(drv, 3, caps[3])
     ro = _abs_window(drv, 2, caps[2])
     f_cz_code = units._freq_code(F_CZ, m.params)
-    print(f"\n[cz-3core] period={period} ncap={ncap} czd={czd} xd={xd} f_cz_code={f_cz_code}\n"
+    print(f"\n[cz-3core] czd={czd} xd={xd} f_cz_code={f_cz_code}\n"
           f"  prep(DAC0)={prep} coupler(DAC3)={cz} readout(DAC2)={ro}")
     assert prep and cz and ro, "a prep / coupler / readout window was silent"
     assert cz[1] == czd, f"coupler window {cz[1]} != CZ length {czd}"
@@ -808,7 +777,7 @@ def _abs_windows(drv, handle):
 
 
 @pytest.mark.cosim
-@pytest.mark.batch_cap(29_000)
+@pytest.mark.batch_cap(40_000)
 def test_cz_drive_form_two_tone_fire_aligned(cosim):
     """FLOOR: ~26 k = 2 core images (~10 k each over AXI) + sized captures — a two-core lock-step
     claim needs both images. The module docstring's table has the full accounting.
@@ -827,35 +796,17 @@ def test_cz_drive_form_two_tone_fire_aligned(cosim):
     cfg = _cz_drive_cfg(m)
     drv.sim.set_model({"kind": "zero"})
     czd = _cz_dur_batches(cfg, (0, 1), m)
-    ro0, demod0, code0, dur0, ddly0 = readout_tables(cfg, 0, m)
     xd = gate_pulse(cfg, 0, m).dur_batches(m, GATE_CH)
-    period = grid_period(relax_batches(cfg, m), 2 * xd + LEAD + czd, dur0, ddly0)
-    fcz = units.freq_to_code(DRIVE_F_CZ, m.params)
-    progs = {}
-    for q, drive in ((0, 0), (1, 1)):
-        gate = cz_drive_table(cfg, (0, 1), q, drive, m, czd)
-        ro, demod, cd, dur, ddly = readout_tables(cfg, q, m)
-        progs[q] = compile_kernel(kernels.k_cz_pop, m, tables=dict(gate=gate, ro=ro, demod=demod),
-                                  out=Array(1), npts=1, shots=1, period=period, code=cd, ddly=ddly,
-                                  role=kernels.CONTROL, knob=kernels.FREQ, form=kernels.DRIVE_FORM,
-                                  xd=xd, czmax=czd, fcz=fcz, fef=0, sw=0, tail=0,
-                                  x0=int(fcz), dx=0, **x90_vz(cfg, q))
-    rq.setup(drv, m, progs)
-    for c in (0, 1):
-        rq.check_magic(drv, m, c, progs[c]); rq.write_var(drv, m, c, progs[c], "__rq_status", 0)
     # sim-2q has no dac_map → SocMap defaults: gate DACs 0/1, both readout drives summed on DAC 14
     rd = m.ro_dac(0)
-    ncap = BOOT_NCAP + 2 * period
-    caps = {d: drv.sim.dac_capture_arm(d, ncap) for d in (m.gate_dac(0), m.gate_dac(1), rd)}
-    rq.reset(drv, m, on=False)
-    for c in (0, 1):
-        rq.poll_done(drv, m, c, progs[c], timeout=batch_timeout(period))
-    rq.reset(drv, m, on=True)
+    caps = {d: drv.sim.dac_capture_arm(d, NCAP_RUN2)
+            for d in (m.gate_dac(0), m.gate_dac(1), rd)}
+    CZSweep(cfg, (0, 1), "freq", span=0.0, points=1, shots=1).run(drv)
     wins = {d: _abs_windows(drv, caps[d]) for d in caps}
 
     ge_code = {q: units._freq_code(DRIVE_F_GE[q], m.params) for q in (0, 1)}
     fcz_code = units._freq_code(DRIVE_F_CZ, m.params)
-    print(f"\n[cz-drive] period={period} ncap={ncap} czd={czd} xd={xd} f_cz_code={fcz_code}\n"
+    print(f"\n[cz-drive] czd={czd} xd={xd} f_cz_code={fcz_code}\n"
           f"  DAC0={[(s, n, c) for s, n, c, _ in wins[0]]}\n"
           f"  DAC1={[(s, n, c) for s, n, c, _ in wins[1]]}\n"
           f"  RO(DAC{rd})={[(s, n, c) for s, n, c, _ in wins[rd]]}")
@@ -871,10 +822,9 @@ def test_cz_drive_form_two_tone_fire_aligned(cosim):
     assert cl0 == czd == cl1, f"CZ windows {cl0}/{cl1} != CZ length {czd}"
     assert abs(cc0 - fcz_code) < 40, f"control line not at f_CZ: {cc0} vs {fcz_code}"
     assert abs(cc1 - fcz_code) < 40, f"target line not at f_CZ: {cc1} vs {fcz_code}"
-    # each core's grid is t_ro = now() + period, so cross-core starts carry the boot skew of the
-    # independent now() reads — the SAME ≤2-batch slack the coupler-form gate tolerates; the tones
-    # stay phase-coherent regardless (the carrier phase is time-referenced, checked below)
-    assert abs(cs0 - cs1) <= 2, f"the two CZ lines must fire in lock-step: {cs0} vs {cs1}"
+    # every core's grid starts from the put network's barrier release (k_batched), so the two lines
+    # are aligned EXACTLY — no `now()`-per-core skew to tolerate (03-plan §3.3)
+    assert cs0 == cs1, f"the two CZ lines must fire in lock-step: {cs0} vs {cs1}"
     # the prep ends exactly LEAD before the tone; the tone ends SEP before the shared readout
     assert cs0 - (ps0 + pl0) == LEAD == cs1 - (ps1 + pl1), \
         f"prep→tone gap must be the LEAD phasor-regen gap: {cs0 - (ps0 + pl0)} vs {LEAD}"
@@ -905,7 +855,7 @@ SPECT_F_GE = 100e6                # the spectator's own GE carrier (code 4096, d
 
 
 @pytest.mark.cosim
-@pytest.mark.batch_cap(38_000)
+@pytest.mark.batch_cap(52_000)
 def test_spectator_ramsey_brackets_the_cz_fire(cosim_2q1c):
     """FLOOR: ~35 k = 3 core images (~10 k each over AXI) + sized captures on 4 DACs. The bracket is
     a 3-core geometry, so all three images are the claim; the module docstring's table has the full
@@ -918,10 +868,11 @@ def test_spectator_ramsey_brackets_the_cz_fire(cosim_2q1c):
     before the tone; the SPECTATOR — the COUPLER_FORM ACTIVE Ramsey, window czd + 2·LEAD — plays
     its two Y90s at its OWN GE code so they BRACKET the tone with ~LEAD margin each side. The
     margins are the design (SpectatorPhase docstring): the spectator's 1-slot gate table makes its
-    init preamble shorter than the pair's 2-slot ones, so its `now() + period` grid runs tens of
-    batches EARLY (~58 here) — the first unequal-table multi-core kernel, beyond the ≤2-batch
-    equal-table boot skew — and the symmetric bracket absorbs any sub-LEAD offset. Only the
-    spectator fires the readout, SEP after its close."""
+    init preamble shorter than the pair's 2-slot ones, so the old kernel's `now() + period` grid ran
+    tens of batches EARLY (~58 measured). The universal kernel removes both halves of that: every
+    core's tables are padded to equal slot counts AND the grid starts from the put network's
+    barrier release, so the bracket's two margins are the compiler's, exactly. Only the spectator
+    fires the readout, SEP after its close."""
     drv, m = cosim_2q1c
     cfg = _cz_drive_cfg(m)
     cfg["qubit/2/freq"] = SPECT_F_GE
@@ -932,39 +883,20 @@ def test_spectator_ramsey_brackets_the_cz_fire(cosim_2q1c):
     cfg["readout/2/demod/dur"] = _s(40, m)
     drv.sim.set_model({"kind": "zero"})
     czd = _cz_dur_batches(cfg, (0, 1), m)
-    fcz = units.freq_to_code(DRIVE_F_CZ, m.params)
-    hpi = pack16(units._phase_code(math.pi / 2))
-    ro_s, demod_s, code_s, dur_s, ddly_s = readout_tables(cfg, 2, m)
     xd = gate_pulse(cfg, 2, m).dur_batches(m, GATE_CH)
-    period = grid_period(relax_batches(cfg, m), 3 * xd + czd + 2 * LEAD, dur_s, ddly_s)
-    common = dict(npts=1, shots=1, period=period, ddly=ddly_s, hpi=hpi, xd=xd, p0=0, dp=0)
-    progs = {2: compile_kernel(                       # the spectator: the bystander Ramsey (X3)
-        kernels.k_cz_local, m,
-        tables=dict(gate=ParamTable(GATE_CH, qubit_freq(cfg, 2),
-                                    {"x90": gate_pulse(cfg, 2, m)}), ro=ro_s, demod=demod_s),
-        out=Array(1), code=code_s, role=kernels.ACTIVE, form=kernels.COUPLER_FORM,
-        czd=czd + 2 * LEAD, fcz=0, fef=0, sw=0, tail=0, sp=0, **common, **x90_vz(cfg, 2))}
-    for q, drive, sp in ((0, 0, 1), (1, 1, 0)):       # the pair; the conditional (0) preps |1>
-        gate = cz_drive_table(cfg, (0, 1), q, drive, m, czd)
-        ro, demod, cd, dur, ddly = readout_tables(cfg, q, m)
-        progs[q] = compile_kernel(kernels.k_cz_local, m, tables=dict(gate=gate, ro=ro, demod=demod),
-                                  out=Array(1), code=cd, role=kernels.SPECTATOR,
-                                  form=kernels.DRIVE_FORM, czd=czd, fcz=fcz, fef=0, sw=0, tail=0,
-                                  sp=sp, **common, **x90_vz(cfg, q))
-    rq.setup(drv, m, progs)
-    for c in (0, 1, 2):
-        rq.check_magic(drv, m, c, progs[c]); rq.write_var(drv, m, c, progs[c], "__rq_status", 0)
-    ncap = BOOT_NCAP + 2 * period
-    caps = {d: drv.sim.dac_capture_arm(d, ncap) for d in (0, 1, 3, 2)}
-    rq.reset(drv, m, on=False)
-    for c in (0, 1, 2):
-        rq.poll_done(drv, m, c, progs[c], timeout=batch_timeout(period))
-    rq.reset(drv, m, on=True)
+    cfg["two_qubit/(0, 1)/CZ/pulse"].append(              # the spectator's own vz entry in the list
+        {"channel": "Q2", "env": "virtualz", "kwargs": {"phase": 0.0}})
+    caps = {d: drv.sim.dac_capture_arm(d, NCAP_RUN3) for d in (0, 1, 3, 2)}
+    SpectatorPhase(cfg, (0, 1), spectator=2, conditional=0, points=1, shots=1).run(drv)   # sp = 0, then 1
     wins = {d: _abs_windows(drv, caps[d]) for d in caps}
+    # the class reruns the conditional prep off (sp = 0) then on (sp = 1); the geometry claim is
+    # about the CONDITIONAL shot, so keep the windows after the first shot's readout
+    split = wins[2][0][0]                        # the first shot's readout (a handle fetches once)
+    wins = {d: [w for w in v if w[0] > split] for d, v in wins.items()}
 
     fcz_code = units._freq_code(DRIVE_F_CZ, m.params)
     sge_code = units._freq_code(SPECT_F_GE, m.params)
-    print(f"\n[spectator] period={period} ncap={ncap} czd={czd} xd={xd} f_cz_code={fcz_code}\n"
+    print(f"\n[spectator] czd={czd} xd={xd} f_cz_code={fcz_code}\n"
           f"  cond(DAC0)={[(s, n, c) for s, n, c, _ in wins[0]]}\n"
           f"  pair(DAC1)={[(s, n, c) for s, n, c, _ in wins[1]]}\n"
           f"  spect(DAC3)={[(s, n, c) for s, n, c, _ in wins[3]]}\n"
@@ -976,7 +908,7 @@ def test_spectator_ramsey_brackets_the_cz_fire(cosim_2q1c):
     assert ppl == 2 * xd and abs(ppc - units._freq_code(DRIVE_F_GE[0], m.params)) < 40
     assert cl0 == czd == cl1
     assert abs(cc0 - fcz_code) < 40 and abs(cc1 - fcz_code) < 40
-    assert abs(cs0 - cs1) <= 2, f"CZ lines not in lock-step: {cs0} vs {cs1}"
+    assert cs0 == cs1, f"CZ lines not in lock-step: {cs0} vs {cs1}"
     assert cs0 - (pps + ppl) == LEAD, f"cond prep→tone gap {cs0 - (pps + ppl)} != LEAD {LEAD}"
     # the spectator: two GE-code Y90s that BRACKET the pair's tone (sub-2·LEAD margins each side —
     # nominal LEAD ± the deterministic preamble-offset the docstring pins)
@@ -990,8 +922,8 @@ def test_spectator_ramsey_brackets_the_cz_fire(cosim_2q1c):
         f"spectator prep must end BEFORE the tone starts (margin < 2*LEAD): head={head}"
     assert 0 < tail < 2 * LEAD, \
         f"spectator close must fire AFTER the tone ends (margin < 2*LEAD): tail={tail}"
-    assert head + tail == pytest.approx(2 * LEAD, abs=4), \
-        f"bracket margins must sum to the 2*LEAD slack: {head} + {tail}"
+    assert head + tail == 2 * LEAD, \
+        f"bracket margins must sum to the 2*LEAD slack exactly: {head} + {tail}"
     # only the spectator reads out, SEP after its close
     assert len(wins[2]) == 1, "expected ONE readout window (the spectator's)"
     assert abs((wins[2][0][0] - (scs + scl)) - SEP) <= 1, \
@@ -1017,7 +949,7 @@ def _cz_sandwich_cfg(m):
 
 
 @pytest.mark.cosim
-@pytest.mark.batch_cap(30_000)
+@pytest.mark.batch_cap(40_000)
 def test_cz_sandwich_dac_train_aligned(cosim):
     """FLOOR: ~27 k = 2 core images (~10 k each over AXI) + sized captures — the shelf/partner
     lock-step claim needs both. The module docstring's table has the full accounting.
@@ -1033,39 +965,20 @@ def test_cz_sandwich_dac_train_aligned(cosim):
     cfg = _cz_sandwich_cfg(m)
     drv.sim.set_model({"kind": "zero"})
     czd = _cz_dur_batches(cfg, (0, 1), m)
-    shelf, sw_binds, tail = _sandwich_binds(cfg, (0, 1), m)
-    efd = tail - LEAD
+    shelf = cz_sandwich(cfg, (0, 1))
     assert shelf == 1
+    efd = resolve(cfg, shelf, "EF/x", m).dur
     xd = gate_pulse(cfg, 0, m).dur_batches(m, GATE_CH)
-    ro0, demod0, code0, dur0, ddly0 = readout_tables(cfg, 0, m)
-    period = grid_period(relax_batches(cfg, m), 2 * xd + LEAD + czd + 2 * tail, dur0, ddly0)
-    fcz = units.freq_to_code(DRIVE_F_CZ, m.params)
-    progs = {}
-    for q, drive in ((0, 0), (1, 1)):
-        gate = cz_drive_table(cfg, (0, 1), q, drive, m, czd)
-        assert list(gate.pulses) == ["x90", "cz", "ef"]          # the ef slot pads BOTH cores
-        ro, demod, cd, dur, ddly = readout_tables(cfg, q, m)
-        progs[q] = compile_kernel(kernels.k_cz_pop, m, tables=dict(gate=gate, ro=ro, demod=demod),
-                                  out=Array(1), npts=1, shots=1, period=period, code=cd, ddly=ddly,
-                                  role=kernels.CONTROL, knob=kernels.FREQ, form=kernels.DRIVE_FORM,
-                                  xd=xd, czmax=czd, fcz=fcz, tail=tail, x0=int(fcz), dx=0,
-                                  **sw_binds[q], **x90_vz(cfg, q))
-    rq.setup(drv, m, progs)
-    for c in (0, 1):
-        rq.check_magic(drv, m, c, progs[c]); rq.write_var(drv, m, c, progs[c], "__rq_status", 0)
     rd = m.ro_dac(0)
-    ncap = BOOT_NCAP + 2 * period
-    caps = {d: drv.sim.dac_capture_arm(d, ncap) for d in (m.gate_dac(0), m.gate_dac(1), rd)}
-    rq.reset(drv, m, on=False)
-    for c in (0, 1):
-        rq.poll_done(drv, m, c, progs[c], timeout=batch_timeout(period))
-    rq.reset(drv, m, on=True)
+    caps = {d: drv.sim.dac_capture_arm(d, NCAP_RUN2)
+            for d in (m.gate_dac(0), m.gate_dac(1), rd)}
+    CZSweep(cfg, (0, 1), "freq", span=0.0, points=1, shots=1).run(drv)
     wins = {d: _abs_windows(drv, caps[d]) for d in caps}
 
     ge_code = {q: units._freq_code(DRIVE_F_GE[q], m.params) for q in (0, 1)}
     ef_code = units._freq_code(SAND_F_EF, m.params)
     fcz_code = units._freq_code(DRIVE_F_CZ, m.params)
-    print(f"\n[cz-sandwich] period={period} ncap={ncap} czd={czd} xd={xd} efd={efd} tail={tail}\n"
+    print(f"\n[cz-sandwich] czd={czd} xd={xd} efd={efd}\n"
           f"  partner(DAC0)={[(s, n, c) for s, n, c, _ in wins[0]]}\n"
           f"  shelf(DAC1)={[(s, n, c) for s, n, c, _ in wins[1]]}\n"
           f"  RO(DAC{rd})={[(s, n, c) for s, n, c, _ in wins[rd]]}")
@@ -1084,7 +997,7 @@ def test_cz_sandwich_dac_train_aligned(cosim):
     (pps, ppl, ppc, _), (cs0, cl0, cc0, _) = wins[0]
     assert ppl == 2 * xd and abs(ppc - ge_code[0]) < 40, "partner prep not at its OWN f_GE"
     assert cl0 == czd and abs(cc0 - fcz_code) < 40, "partner cz tone not at f_CZ for the CZ length"
-    assert abs(cs0 - czs) <= 2, f"cz tones must fire in lock-step: partner {cs0} vs shelf {czs}"
+    assert cs0 == czs, f"cz tones must fire in lock-step: partner {cs0} vs shelf {czs}"
     # the summed readout opens SEP after the shelf's un-shelving EF X ends (± the boot skew)
     assert len(wins[rd]) == 1, "expected ONE summed readout window"
     gap = wins[rd][0][0] - (e2s + e2l)
@@ -1174,15 +1087,14 @@ def test_cz_amp_freq_sweep_peaks_at_the_planted_cz(cosim):
     # ONE line fires, so |E| = that line's amp_est: plant the rate that closes 2*pi at A*
     rabi_cz = 2 * math.pi / gate_sigma(m, cz_pulse, AF_F_CZ, a_star)
 
-    gate = cz_drive_table(cfg, (0, 1), 0, 0, m, czd)
-    ro, demod, code, dur, ddly = readout_tables(cfg, 0, m)
-    xd = gate_pulse(cfg, 0, m).dur_batches(m, GATE_CH)
-    period = grid_period(relax_batches(cfg, m), 2 * xd + LEAD + czd, dur, ddly)
-    prog = compile_kernel(kernels.k_cz_pop, m, tables=dict(gate=gate, ro=ro, demod=demod),
-                          out=Array(1), npts=1, shots=1, period=period, code=code, ddly=ddly,
-                          role=kernels.CONTROL, knob=kernels.FREQ, form=kernels.DRIVE_FORM,
-                          xd=xd, czmax=czd, fcz=_cz_freq_word(cfg, (0, 1), m), fef=0, sw=0, tail=0,
-                          dx=0, **x90_vz(cfg, 0))
+    # core 0 alone: the |11> prep's own half (the target is planted |1>) then its CZ line, with the
+    # amp on the first on-core axis and the carrier on the second — the two knobs the landscape
+    # sweeps, here as one-point axes the probe rewrites per cell
+    a_ax, f_ax = Axis.amp(AF_AMP, AF_AMP, 1), Axis.freq_codes(
+        units._freq_code(AF_F_CZ, m.params), units._freq_code(AF_F_CZ, m.params), 1, m)
+    tone = Pulse(cz_pulse.env, cz_pulse.amp, AF_F_CZ, cz_pulse.phase)
+    seq = [Gate("x90"), Gate("x90"), Gate(tone, line=0, amp=a_ax, freq=f_ax)]
+    progs = probe_progs(cosim, cfg, [0], {0: seq}, {0: (a_ax, f_ax)}, label="ampfreq")
     spec = {"kind": "twoqubit", "control": 0, "target": 1,     # no "coupler" key ⇒ the drive form
             "f_ge": [AF_F_GE[0], AF_F_GE[1]], "f_ef": [AF_F_EF[0], AF_F_EF[1]],
             "rabi_ge": [rabi_for(m, gate_pulse(cfg, 0, m), AF_F_GE[0], math.pi / 2), 0.0],
@@ -1192,12 +1104,11 @@ def test_cz_amp_freq_sweep_peaks_at_the_planted_cz(cosim):
             "init": [0, 1],                                    # the target is planted |1>
             "collapse": False, "noise_scale": 0.0}
     f_code = units._freq_code(AF_F_CZ, m.params)
-    slot = gate.slot_of("cz")
-    p = Probe(cosim, {0: prog})
+    p = Probe(cosim, progs)
 
     for amp_code, dcode in ((a_star // 2, 0), (a_star, 0), (a_star // 2, AF_DETUNE_CODE)):
-        rq.write_slot(drv, m, 0, prog, "gate", slot, "amp", int(amp_code))
-        pops = np.asarray(p.state(spec, {0: {"x0": pack16(f_code + dcode)}})["populations"])
+        pops = np.asarray(p.state(spec, {0: {"x0": int(amp_code) << 16, "dx0": 0,
+                                             "x1": pack16(f_code + dcode), "dx1": 0}})["populations"])
         theta = rabi_cz * gate_sigma(m, cz_pulse, AF_F_CZ, int(amp_code))
         om, delta = theta / czd, 2 * math.pi * dcode / (1 << 12)
         om_g = math.hypot(om, delta)

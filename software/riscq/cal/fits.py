@@ -217,3 +217,52 @@ def fit_linear(x, y) -> Fit:
     if slope != 0:
         params["root"] = -intercept / slope
     return Fit(ok, slope, math.sqrt(cov[0, 0]) if np.isfinite(cov[0, 0]) else math.nan, params)
+
+
+def _peak_seed(x, y):
+    """(x0, height, baseline) of the extremum that stands out from the median — a peak or a dip."""
+    med = float(np.median(y))
+    i_hi, i_lo = int(np.argmax(y)), int(np.argmin(y))
+    i = i_hi if (y[i_hi] - med) >= (med - y[i_lo]) else i_lo
+    return float(x[i]), float(y[i] - med), med
+
+
+def fit_lorentzian(x, y) -> Fit:
+    """y ≈ y0 + A / (1 + ((x − x0)/w)²) — a spectroscopy line, peak (A > 0) or dip (A < 0);
+    value = x0 (spec 24 §3.3). Seeded FFT-free from the extremum vs the median, the width from
+    the span's quarter (and its half / double, best residual wins)."""
+    x, y = np.asarray(x, float), np.asarray(y, float)
+    if not _fittable(x, y, 4):
+        return _NONE
+
+    def model(t, y0, A, x0, w):
+        return y0 + A / (1.0 + ((t - x0) / w) ** 2)
+
+    x0, A, y0 = _peak_seed(x, y)
+    span = float(x[-1] - x[0]) or 1.0
+    best = _best_of(model, x, y, [(y0, A, x0, span * s) for s in (0.25, 0.1, 0.5)])
+    if best is None:
+        return _NONE
+    _, (y0, A, x0, w), perr = best
+    ok = bool(np.all(np.isfinite(perr)) and x[0] <= x0 <= x[-1] and w != 0)
+    return Fit(ok, float(x0), float(perr[2]), {"y0": y0, "A": A, "x0": x0, "w": abs(w)})
+
+
+def fit_gaussian(x, y) -> Fit:
+    """y ≈ y0 + A·exp(−(x − x0)²/(2σ²)); value = x0 (the error-amplification product peak, spec 24
+    §3.11). Seeded like the Lorentzian."""
+    x, y = np.asarray(x, float), np.asarray(y, float)
+    if not _fittable(x, y, 4):
+        return _NONE
+
+    def model(t, y0, A, x0, s):
+        return y0 + A * np.exp(-0.5 * ((t - x0) / s) ** 2)
+
+    x0, A, y0 = _peak_seed(x, y)
+    span = float(x[-1] - x[0]) or 1.0
+    best = _best_of(model, x, y, [(y0, A, x0, span * s) for s in (0.25, 0.1, 0.5)])
+    if best is None:
+        return _NONE
+    _, (y0, A, x0, s), perr = best
+    ok = bool(np.all(np.isfinite(perr)) and x[0] <= x0 <= x[-1] and s != 0)
+    return Fit(ok, float(x0), float(perr[2]), {"y0": y0, "A": A, "x0": x0, "sigma": abs(s)})

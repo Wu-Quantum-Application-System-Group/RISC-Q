@@ -48,7 +48,8 @@ class _Emitter:
             for t in k.tables:
                 w(f"volatile struct rq_slot {t.name}[{t.count}] RQ_PARAM = {{0}};")
         inputs = [(n, s) for n, s in k.arrays.items() if n in k.input_arrays]
-        outputs = [(n, s) for n, s in k.arrays.items() if n not in k.input_arrays]
+        outputs = [(n, s) for n, s in k.arrays.items()
+                   if n not in k.input_arrays and n not in k.host_arrays]
         if inputs:
             w("/* input arrays (.data) — host-preloaded by name; RQ_PARAM survives boot */")
             for n, size in inputs:
@@ -57,6 +58,12 @@ class _Emitter:
             w("/* result arrays (.bss) — host-read by name */")
             for n, size in outputs:
                 w(f"volatile int32_t {n}[{size}];")
+        if k.host_arrays:
+            w("/* host-window result arrays — NO RAM object: the stores land in PS DDR4 at")
+            w("   host_base + (core << 24) + offset, read back with Driver.read_host */")
+            for n, (off, size) in k.host_arrays.items():
+                w(f"static volatile int32_t *const {n} = "
+                  f"(volatile int32_t *)(RQ_HOSTWIN + {off});  /* {size} words */")
         w("")
         w("int main(void) {")
         for n, ty in k.locals.items():

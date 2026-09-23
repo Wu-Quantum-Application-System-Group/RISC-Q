@@ -1,22 +1,15 @@
-"""Shared calibration infrastructure (spec 06 §1, spec 08 §6 batched cut-over).
-
-Every calibration runs its whole sweep as ONE batched run on the core (riscq.cal.kernels): the kernel
-COMPUTES the swept knob on-core from a scalar sweep descriptor (a Q16 or int pair — spec 09; the input
-Arrays are gone), walking it on a FIXED-period grid whose idle head is the T1 relax reset (the model
-has no auto-reset, spec-M4 B0), so every readout lands at the same time-referenced demod-LO phase. The
-demod carrier's discrimination phase (measured by ReadoutCalibration) is baked into the readout tables;
-firing the demod IS the readout (its `dur` is the integration window). This module holds the batch
-composers:
+"""Shared calibration infrastructure (spec 06 §1; the batched grid of spec 08 §6, the universal
+base of specs/universal-cal). Every calibration runs its sweep as ONE batched run per experiment
+(riscq.cal.batched.k_batched on a fixed-period grid whose idle head is the relax reset); this
+module holds what every layer shares:
   - batches / seconds / relax_batches — the physical-units boundary (spec 13 §2: the Config and the
     calibration knobs are Hz / seconds / normalized amp; codes and batches are derived HERE),
-  - gate_pulse / prep / x90_vz — the Config's own gate envelopes, qcal's two |1> preps (spec 13 §4)
-    and the X90's virtual-Z frame bracket (spec 13 §7),
+  - gate_pulse / qubit_freq — the Config's own gate envelope and carrier (spec 13 §4),
   - readout_tables / demod_table — the ro-drive + demod-carrier table pair (amp / env / phase / delay),
-  - grid_period / batch_timeout — the host-computed fixed period + poll timeout,
+  - grid_period / herald_offset / batch_timeout — the host-computed fixed period + poll timeout,
   - sweep_q16 — the (x0q, dxq) Q16 sweep descriptor + the exact int x-axis the kernel realizes,
-  - population / sweep_counts / rerun_counts — a params-only counts-mode sweep/rerun of ALL requested
-    cores in one run, returning {q: |1> population P} (spec 13 §8 simultaneous multi-qubit),
-  - acquire_shots — a per-prep raw-mode capture of all cores, returning {q: one prep state's IQ shots}.
+  - population / population_heralded / _levels_pop — counts and RAW captures → |1> / P(level),
+  - Result — every calibration's return contract (ok / oks / data / fit / proposal / apply / plot).
 """
 
 from __future__ import annotations
@@ -26,9 +19,8 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from riscq import run as rq
 from riscq.lang import ParamTable
-from riscq.map import LEAD, READOUT_LEAD, READOUT_MAX_WIN_LOG2, pack16
+from riscq.map import LEAD, READOUT_LEAD, READOUT_MAX_WIN_LOG2, ChannelInfo, pack16
 from riscq.pulses import Pulse, envelopes, golden, units
 
 # The PHYSICAL gap (batches) between a sequence's last drive pulse and its readout window — every
@@ -40,8 +32,38 @@ from riscq.pulses import Pulse, envelopes, golden, units
 # core-halting herald read, which names LEAD explicitly (`_herald_extra` / `herald_offset`).
 SEP = 8                 # smallest clean prep→readout gap (spec 16 S1 sweep: 4 clips the window head)
 GATE_ENV = envelopes.square(16)   # default gate envelope (4 batches at gateInterp 4)
-GATE_CH = 0                       # the gate channel (the x90/x pulse table's channel)
-X90, X = 0, 1                     # the kernels' compile-time `prep_gate` binding (spec 13 §4)
+GATE_CH = 0                       # the gate channel's INDEX (the x90/x pulse table's channel)
+
+
+# ── the three channels a qubit core's calibrations use, resolved BY NAME on the build's SocMap
+# (specs/universal-control/01 §2.5): a build whose cores carry more channels still finds them. ──
+
+def gate_ch(m, core: int = 0) -> ChannelInfo:
+    """The core's gate drive channel (the x90/x/EF pulse tables' channel)."""
+    return m.channel_named("gate", core)
+
+
+def ro_ch(m, core: int = 0) -> ChannelInfo:
+    """The core's readout drive channel (the measurement tone)."""
+    return m.channel_named("ro", core)
+
+
+def demod_ch(m, core: int = 0) -> ChannelInfo:
+    """The core's demod-carrier channel (firing it IS the readout)."""
+    return m.channel_named("demod", core)
+
+
+def line(cfg, q: int, name: str, m) -> ChannelInfo:
+    """A drive line by name (spec 24 §4.1): `qubit` is the qubit's own gate channel; any other name is
+    the Config's `lines/<name>/core` (+ optional `lines/<name>/channel`, default = the name) — on a
+    multi-channel core the same core as the qubit, on a one-line-per-core build another core."""
+    if name == "qubit":
+        return gate_ch(m, q)
+    key = f"lines/{name}/core"
+    if key not in cfg:
+        raise KeyError(f"no line {name!r}: the Config has no {key}")
+    return m.channel_named(cfg.get(f"lines/{name}/channel", name), int(cfg[key]))
+
 
 # ── deep-gate-train pacing (spec 14 F1) ──
 # Every PulseGenerator parameter sits behind a depth-4 TimedQueue on the posted RF link, and a push
@@ -117,8 +139,8 @@ def heralding(cfg) -> bool:
     return bool(cfg.get("readout/herald", False))
 
 
-def demod_table(n: int, phase: float = 0.0, env=None, amp: float = 1.0) -> ParamTable:
-    """The demod-carrier pulse on channel 2 — the readout demod is a plain drive channel fed to
+def demod_table(n: int, m, phase: float = 0.0, env=None, amp: float = 1.0) -> ParamTable:
+    """The demod-carrier pulse on the core's `demod` channel — a plain drive channel fed to
     the carrier-triggered decoder, programmed/played with the generic init_pulse_params/set_freq/play.
     Its carrier freq is set separately via set_freq with an ADC-rate demod_freq_to_code code, so the
     table freq is unused (0). Played per shot; its `dur` (n batches) IS the readout integration window
@@ -129,21 +151,20 @@ def demod_table(n: int, phase: float = 0.0, env=None, amp: float = 1.0) -> Param
     write_slot("phase")); ReadoutCalibration measures it."""
     assert n <= (1 << READOUT_MAX_WIN_LOG2), \
         f"demod window {n} exceeds the decoder no-overflow cap {1 << READOUT_MAX_WIN_LOG2} batches"
-    return ParamTable(2, 0.0, {"sq": Pulse(envelopes.square(n) if env is None else env,
-                                           amp=amp, phase=phase)})
+    return ParamTable(demod_ch(m), 0.0, {"sq": Pulse(envelopes.square(n) if env is None else env,
+                                                     amp=amp, phase=phase)})
 
 
-def _channel_env(cfg, path: str, n_batches: int, channel: int, m):
-    """The envelope a Config names for `channel`, built on that channel's stored-sample grid:
+def _channel_env(cfg, path: str, n_batches: int, ch: ChannelInfo, m):
+    """The envelope a Config names for channel `ch`, built on that channel's stored-sample grid:
     `{path}/env` (a qcal env name, default square) shaped by `{path}/kwargs`."""
-    ch = m.channel(channel)
     return envelopes.build(cfg.get(f"{path}/env", "square"), n_batches * ch.samples_per_line,
                            ch.samples_per_line * m.params.dsp_freq_hz,
                            **cfg.get(f"{path}/kwargs", {}))
 
 
 def readout_tables(cfg, q: int, m, phase: float | None = None, win: float | None = None):
-    """The (channel-1 readout drive, channel-2 demod carrier) table pair for qubit q's readout, plus
+    """The (`ro` drive, `demod` carrier) table pair for qubit q's readout, plus
     the demod carrier code, the integration window and the demod delay (batches). All Config values
     are physical (spec 13 §3):
 
@@ -164,9 +185,10 @@ def readout_tables(cfg, q: int, m, phase: float | None = None, win: float | None
     n = batches(cfg[f"readout/{q}/demod/dur"] if win is None else win, m)
     delay = batches(cfg.get(f"readout/{q}/demod/delay", 0.0), m)
     ph = float(cfg.get(f"readout/{q}/demod/phase", 0.0)) if phase is None else float(phase)
-    ro = ParamTable(1, ro_freq, {"meas": Pulse(_channel_env(cfg, f"readout/{q}", drive, 1, m),
-                                               freq_hz=ro_freq, amp=float(cfg[f"readout/{q}/amp"]))})
-    demod = demod_table(n, ph, _channel_env(cfg, f"readout/{q}/demod", n, 2, m),
+    ro = ParamTable(ro_ch(m), ro_freq,
+                    {"meas": Pulse(_channel_env(cfg, f"readout/{q}", drive, ro_ch(m), m),
+                                   freq_hz=ro_freq, amp=float(cfg[f"readout/{q}/amp"]))})
+    demod = demod_table(n, m, ph, _channel_env(cfg, f"readout/{q}/demod", n, demod_ch(m), m),
                         float(cfg.get(f"readout/{q}/demod/amp", 1.0)))
     return ro, demod, units.demod_freq_to_code(ro_freq, m.params), n, delay
 
@@ -244,7 +266,7 @@ def gate_sigma(m, pulse: Pulse, carrier_hz: float, amp_code: int) -> float:
     """Σ over the pulse of the per-batch drive estimate amp_est = √(2·mean(sample²)) on the
     bit-exact DAC golden — exactly what TwoLevelModel integrates, so θ = rabi_rad_per_amp·gate_sigma
     is the qubit's rotation angle. Linear in amp_code (used to convert a fitted Rabi rate)."""
-    lines = pulse.packed_lines(m, 0)   # gate channel
+    lines = pulse.packed_lines(m, gate_ch(m).index)
     w = golden.pulse_window(lines, int(amp_code), units._freq_code(carrier_hz, m.params),
                             0, 0, len(lines))
     return float(sum(math.sqrt(2 * np.mean(row.astype(float) ** 2)) for row in w))
@@ -316,88 +338,12 @@ def gate_pulse(cfg, q: int, m, name: str = "x90") -> Pulse:
     default square gate."""
     path = f"qubit/{q}/{name}"
     env = GATE_ENV if f"{path}/env" not in cfg \
-        else _channel_env(cfg, path, batches(cfg[f"{path}/dur"], m), GATE_CH, m)
+        else _channel_env(cfg, path, batches(cfg[f"{path}/dur"], m), gate_ch(m), m)
     return Pulse(env, freq_hz=qubit_freq(cfg, q), amp=float(cfg[f"{path}/amp"]),
                  phase=float(cfg.get(f"{path}/phase", 0.0)))
 
 
-def prep(cfg, q: int, m, gate: str = "X90") -> tuple[ParamTable, int, int]:
-    """qcal's two |1> preps (readout.py:129-132) → (gate table, the kernels' compile-time `prep_gate`
-    binding, the prep's length in batches):
-
-      'X90' → TWO X90 plays (one `play` + one bare `fire`; B0's startTime auto-advance makes the train
-              contiguous, the same trick as k_rabi's n-gate train);
-      'X'   → ONE play of the config's own X pulse (`qubit/{q}/x/*`) — on X6Y3 a double-LENGTH,
-              same-amplitude FAST_DRAG, which is why the old "π = 2× the X90 amp" synthesis is gone.
-
-    The table carries both slots when the config defines an X; the kernel's `prep_gate` fold picks one
-    and the dead branch is eliminated before slot resolution, so an X90 prep still compiles on a config
-    that has no X."""
-    assert gate in ("X90", "X"), f"prep gate must be 'X90' or 'X', got {gate!r}"
-    pulses = {"x90": gate_pulse(cfg, q, m)}
-    if f"qubit/{q}/x/amp" in cfg:
-        pulses["x"] = gate_pulse(cfg, q, m, "x")
-    table = ParamTable(GATE_CH, qubit_freq(cfg, q), pulses)
-    if gate == "X":
-        assert "x" in pulses, f"prep gate 'X' needs qubit/{q}/x/* in the config"
-        return table, X, pulses["x"].dur_batches(m, GATE_CH)
-    return table, X90, 2 * pulses["x90"].dur_batches(m, GATE_CH)
-
-
-def x90_vz(cfg, q: int) -> dict:
-    """The X90's virtual-Z frame bracket (spec 13 §7) as the two SEATED phase words every X90-playing
-    kernel binds: `compile_kernel(..., **x90_vz(cfg, q))`.
-
-    qcal's X90 is virtualz(vz0) · FAST_DRAG · virtualz(vz1) — the pair `qubit/{q}/x90/vz` = [before,
-    after] (rad) that Phase calibrates — so a play is `set_phase_offset(frame + vz0); play; frame +=
-    vz0 + vz1`. The kernels need `vz0` and the frame step `vzsum` = vz0 + vz1; both are seated words
-    (spec 12), summed in the code domain so they wrap mod one turn like every other phase. A config
-    with no pair (every co-sim one) gets [0, 0] and the bracket is a no-op."""
-    v0, v1 = cfg.get(f"qubit/{q}/x90/vz", [0.0, 0.0])
-    c0, c1 = units._phase_code(float(v0)), units._phase_code(float(v1))
-    return {"vz0": pack16(c0), "vzsum": pack16(c0 + c1)}
-
-
-def ef_vz(cfg, q: int, name: str = "x90") -> dict:
-    """The EF gate's own virtual-Z frame bracket — `x90_vz`'s EF twin (spec 14 §3 finding 6), bound as
-    `evz0`/`evzsum` so an EF kernel can carry BOTH brackets at once (the GE prep's vz0/vzsum and this
-    one) without the names colliding: `compile_kernel(..., **x90_vz(cfg, q), **ef_vz(cfg, q))`.
-
-    qcal's EF X90 is the same virtualz(vz0) · FAST_DRAG · virtualz(vz1) triplet as the GE one — the
-    pair `qubit/{q}/EF/{name}/vz` that `EFPhase` calibrates — so every EF gate in its EF
-    Amplitude/Frequency/Phase circuits plays it, and the config of record carries a non-trivial pair
-    on all 8 qubits (q2 −0.163 rad, q6 −0.133). The EF X is a bare FAST_DRAG with no pair, so
-    `name='x'` finds no key and folds to a no-op — as does every co-sim config."""
-    v0, v1 = cfg.get(f"qubit/{q}/EF/{name}/vz", [0.0, 0.0])
-    c0, c1 = units._phase_code(float(v0)), units._phase_code(float(v1))
-    return {"evz0": pack16(c0), "evzsum": pack16(c0 + c1)}
-
-
 # ── EF-subspace gate table (spec two-qubit/01 §4.1) ──
-
-def ef_pulse(cfg, q: int, m, name: str = "x90") -> Pulse:
-    """The Config's own EF gate pulse `qubit/{q}/EF/{name}` ('x90' or 'x' — the X6Y3 EF X the
-    sandwich CZ shelves with, spec 04 §1) — its envelope (`env` + `kwargs`, default square) and
-    normalized `amp`/`phase`, BASEBAND (freq_hz=None): the EF carrier is programmed at runtime by
-    set_freq, not baked into the pulse, so it can share the gate channel with the GE prep."""
-    path = f"qubit/{q}/EF/{name}"
-    env = GATE_ENV if f"{path}/env" not in cfg \
-        else _channel_env(cfg, path, batches(cfg[f"{path}/dur"], m), GATE_CH, m)
-    return Pulse(env, amp=float(cfg[f"{path}/amp"]), phase=float(cfg.get(f"{path}/phase", 0.0)))
-
-
-def ef_table(cfg, q: int, m, name: str = "x90") -> tuple[ParamTable, int, int]:
-    """The gate table + SEATED carrier words for the EF calibrations → (table, ge_freq, ef_freq). The
-    table carries the GE prep X90 (slot "x90") and the EF gate `name` (slot "ef" — the X90 by
-    default, the config's EF X for the π-amplitude cal), BOTH baseband so the kernel drives each
-    segment at its own carrier: `ge_freq` = the config's GE carrier, `ef_freq` its EF carrier
-    (`qubit/{q}/EF/freq`). ONE NCO per channel, retuned between segments (spec 01 §4.1)."""
-    ge = gate_pulse(cfg, q, m)                                   # the config GE X90
-    ge = Pulse(ge.env, amp=ge.amp, phase=ge.phase)              # strip freq_hz → baseband
-    table = ParamTable(GATE_CH, qubit_freq(cfg, q), {"x90": ge, "ef": ef_pulse(cfg, q, m, name)})
-    return (table, units.freq_to_code(qubit_freq(cfg, q), m.params),
-            units.freq_to_code(float(cfg[f"qubit/{q}/EF/freq"]), m.params))
-
 
 # ── batched sweeps: one run is the whole sweep (spec 08 §2, §6; spec 09 computed knobs) ──
 
@@ -420,32 +366,6 @@ def population_heralded(out, sign: int = 1) -> np.ndarray:
     return p if sign > 0 else 1.0 - p
 
 
-def _counts_to_pop(out, q, shots, signs, herald) -> np.ndarray:
-    """Decode one core's `out` array into a |1> population: heralded runs write interleaved
-    (count, kept) pairs (P = count/kept, spec 13 §8), plain runs write one count per point (P =
-    count/shots). Res-sign folded either way."""
-    return (population_heralded(out[q]["out"], signs[q]) if herald
-            else population(out[q]["out"], shots, signs[q]))
-
-
-def sweep_counts(drv, m, progs, params, shots: int, timeout: int, signs, herald: bool = False) -> dict:
-    """Batched counts-mode sweep across ALL requested cores (spec 13 §8): ONE `rq.run` of every core's
-    `progs[q]` — the swept knob is COMPUTED on-core from the scalar `params[q]` (a Q16 or int pair,
-    e.g. {"a0q": ..., "daq": ..., "prep": 1}), so there are no input Arrays. Returns `{q: P}` — each
-    core's self-normalised populations in [0, 1] (no |0> reference / projection), folded through that
-    qubit's res-sign `signs[q]`. `herald` selects the interleaved (count, kept) decode (spec 13 §8)."""
-    out = rq.run(drv, m, progs, params=params, results=["out"], timeout=timeout)
-    return {q: _counts_to_pop(out, q, shots, signs, herald) for q in progs}
-
-
-def rerun_counts(drv, m, progs, params, shots: int, timeout: int, signs, herald: bool = False) -> dict:
-    """Like `sweep_counts` but a `rq.rerun` of already-`setup` cores (no reload) — the reruns a cal
-    issues per detuning / per prep state / per window over the one resident image (spec 08 §4).
-    Returns `{q: P}`."""
-    out = rq.rerun(drv, m, progs, params=params, results=["out"], timeout=timeout)
-    return {q: _counts_to_pop(out, q, shots, signs, herald) for q in progs}
-
-
 def _levels_pop(out_arr, npts: int, shots: int, classifier, level: int) -> np.ndarray:
     """P(`level`) per point from a RAW capture's IQ (out sized 2·npts·shots, the point-major cursor the
     RAW kernels write): reshape to (npts, shots, 2), classify every shot into a level with the 3-level
@@ -455,29 +375,3 @@ def _levels_pop(out_arr, npts: int, shots: int, classifier, level: int) -> np.nd
     return np.array([float(np.mean(classifier.classify(iq[i]) == level)) for i in range(npts)])
 
 
-def sweep_levels(drv, m, progs, params, npts: int, shots: int, timeout: int, classifiers,
-                 level: int = 2) -> dict:
-    """Batched RAW-mode sweep across ALL cores → `{q: P(level)}` via each core's pre-trained 3-level
-    ClassifierN (spec 01 §4.1): ONE `rq.run` of every core's `progs[q]`, the swept knob COMPUTED on-core
-    from the scalar `params[q]`. `classifiers[q]` is core q's ClassifierN, `level` the level to count
-    (2 → P(|2>), the target of an EF drive)."""
-    out = rq.run(drv, m, progs, params=params, results=["out"], timeout=timeout)
-    return {q: _levels_pop(out[q]["out"], npts, shots, classifiers[q], level) for q in progs}
-
-
-def rerun_levels(drv, m, progs, params, npts: int, shots: int, timeout: int, classifiers,
-                 level: int = 2) -> dict:
-    """Like `sweep_levels` but a `rq.rerun` of already-`setup` cores (the per-detuning reruns EFFrequency
-    issues over one resident image, mirroring `rerun_counts`). Returns `{q: P(level)}`."""
-    out = rq.rerun(drv, m, progs, params=params, results=["out"], timeout=timeout)
-    return {q: _levels_pop(out[q]["out"], npts, shots, classifiers[q], level) for q in progs}
-
-
-def acquire_shots(drv, m, progs, prep: int, shots: int, timeout: int) -> dict:
-    """Per-prep raw-IQ capture across ALL cores (spec 09, 13 §8): one RAW-mode RERUN of the
-    already-`setup` `progs` with the `prep` scalar written for this run. prep=0 → |0>, prep=1 → |1>
-    (two reruns of the resident image, no reload). Returns `{q: (shots, 2)}` real/imag — `shots` is the
-    number of IQ pairs each program writes (Separation passes npts·shots and reshapes per point)."""
-    out = rq.rerun(drv, m, progs, params={q: {"prep": int(prep)} for q in progs}, results=["out"],
-                   timeout=timeout)
-    return {q: out[q]["out"].reshape(shots, 2).astype(float) for q in progs}

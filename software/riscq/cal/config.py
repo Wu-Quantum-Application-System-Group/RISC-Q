@@ -21,7 +21,6 @@ import math
 
 import yaml
 
-from riscq.map import ADC_BATCH
 from riscq.pulses import units
 
 
@@ -107,7 +106,7 @@ class Config:
         Pulse.phase), `vz` the [before, after] frame advance around it. The X6Y3 config uses both —
         q5's FAST_DRAG has a nonzero phase, and q6's virtual-Z pair is NOT equal — so neither may be
         folded into the other. The pair is what Phase calibrates, and what brackets EVERY X90 play in
-        every kernel (base.x90_vz, spec 13 §7)."""
+        every X90 (the compiler's frame bracket, spec 13 §7)."""
         drive = [p for p in pulses if p["env"] != "virtualz"]
         vz = [p for p in pulses if p["env"] == "virtualz"]
         if len(drive) != 1 or len(vz) not in (0, 2):
@@ -194,11 +193,15 @@ class Config:
         if self._qcal is None:
             raise RuntimeError("check_hardware needs a Config loaded by from_qcal")
         hw = self._qcal["hardware"]
-        want = {"DAC": units.sample_rate(params),                  # 16 samples/batch
-                "ADC": ADC_BATCH * params.dsp_freq_hz}             # 4 samples/batch
+        # the rates are the CHANNELS' own (their lanes per batch), resolved by name off the spec
+        cs = params.core(0)
+        want = {"DAC": units.channel_rate(params, cs.channel("gate")),     # 16 lanes/batch
+                "ADC": units.channel_rate(params, cs.channel("demod"))}    # 4 lanes/batch
         for k, v in want.items():
             if float(hw["sample_rate"][k]) != v:
                 raise ValueError(f"qcal {k} sample rate {hw['sample_rate'][k]} != build's {v}")
+        # the interp factors likewise: the uniform views name the gate/ro/demod channels on the
+        # spec and assert every core agrees
         for k, v in (("qdrv", params.gate_interp), ("rdrv", params.readout_interp),
                      ("rdlo", params.demod_interp)):
             if int(hw["interpolation_ratio"][k]) != v:
@@ -207,6 +210,17 @@ class Config:
     def save(self, path) -> None:
         with open(path, "w") as f:
             yaml.safe_dump(self._data, f, default_flow_style=False, sort_keys=True)
+
+    def snapshot(self, directory) -> str:
+        """QICK's two-phase commit reduced to one helper (spec 24 §3.17): copy the working tree
+        to `<directory>/old_config_<timestamp>.yaml` before an `apply()`. Returns the path."""
+        import datetime
+        import os
+        os.makedirs(directory, exist_ok=True)
+        stamp = datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
+        path = os.path.join(directory, f"old_config_{stamp}.yaml")
+        self.save(path)
+        return path
 
     def copy(self) -> "Config":
         dup = Config(self._data)

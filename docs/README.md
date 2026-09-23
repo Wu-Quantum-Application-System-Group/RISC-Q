@@ -71,15 +71,16 @@ and phase encodings live there); read [DSP48](dsp/DSP48.md) before any DSP-heavy
 
 ## SoC & bus fabric — `riscq.soc` (+ `fabric` / `link` / `rf`)
 
-The multi-qubit SoC tying cores to converter-edge DSP over a narrow posted link. **Start with the
-[SoC architecture](soc/ARCH.md)**; read [SOC_TIPS](soc/SOC_TIPS.md) before SoC work.
+The multi-core SoC tying each core to its converter-edge channel list over a narrow posted link. **Start
+with the [SoC architecture](soc/ARCH.md)**; read [SOC_TIPS](soc/SOC_TIPS.md) before SoC work.
 
 | Doc | What |
 |---|---|
 | [SoC architecture](soc/ARCH.md) | The narrow posted-link RF tree + two-region floorplan (overview) |
-| [PulseTableSoc](soc/PulseTableSoc.md) | Multi-qubit control SoC toplevel |
+| [PulseTableSoc](soc/PulseTableSoc.md) | Multi-core control SoC toplevel, built from a `SocSpec` |
+| [SocSpec](soc/SocSpec.md) | The build description (cores → channel lists) and the derived host map, shared with python |
 | [RiscvSoc](soc/RiscvSoc.md) | The hard per-core unit (registered-boundary floorplan target) |
-| [RiscqRfWithPulseTableFiber](soc/RiscqRfWithPulseTableFiber.md) | One qubit: core + RAM + control + RF tree over the link |
+| [RiscqRfWithPulseTableFiber](soc/RiscqRfWithPulseTableFiber.md) | One core: core + RAM + control + its channel list over the link |
 | [Zcu216Top](soc/Zcu216Top.md) | ZCU216 board toplevel scaffolding |
 | [floorplan-harnesses](soc/floorplan-harnesses.md) | `RiscqFarmTop` / `RiscqCloneTop` floorplan-sweep tops |
 | [SOC_TIPS](soc/SOC_TIPS.md) | SoC / fabric / SpinalSim gotchas |
@@ -93,10 +94,32 @@ The multi-qubit SoC tying cores to converter-edge DSP over a narrow posted link.
 | [PostedStoreShim](soc/PostedStoreShim.md) | Local-ack posted-store adapter |
 | **link** — [RfLinkBridge](soc/RfLinkBridge.md) | Core-side posted-write funnel |
 | [RfLink](soc/RfLink.md) | The down-link payload, pipe, and demux |
-| [ReadoutResultLink](soc/ReadoutResultLink.md) | The readout result up-path |
-| **rf** — [PulseParamBuffer](soc/PulseParamBuffer.md) | DSP-side register file for one pulse generator |
-| [RfChannels](soc/RfChannels.md) | `PulseDriveChannel` / `DemodChannel` converter-edge boxes |
-| [ControlMemMaps](soc/ControlMemMaps.md) | The per-core Time / Host control block |
+| [EventLink](soc/EventLink.md) | The up-link as puts into the core's inbox: the reporters' serialisation and the sink kinds (`result`, `fifo`, `latest`, `mailbox`) |
+| [PutHub](soc/PutHub.md) | The board hub: group words, counted barriers with a value-carrying release, unicast signals; the root and the lane on multi-board systems |
+| [PutLane](soc/PutLane.md) | Put frames on the White Rabbit lane: packer, router, unpacker, the CDC FIFOs around the PCS pair |
+| [HostWindow](soc/HostWindow.md) | Per-core write-only window into the PS DDR4 (bridge + funnel) |
+| **rf** — [PulseParamBuffer](soc/PulseParamBuffer.md) | DSP-side register file for one channel |
+| [RfChannels](soc/RfChannels.md) | The `Channel` contract + its `PulseDriveChannel` / `DemodChannel` kinds |
+| [ControlMemMaps](soc/ControlMemMaps.md) | The per-core Time / Done control block |
+| **dio** — [TimedDio](soc/TimedDio.md) | Timed digital I/O: 16 scheduled outputs + 16 timestamped inputs |
+
+## White Rabbit synchronization — `riscq.wr`
+
+Two-board `syncTime` alignment over a GTY serial lane; design in
+[specs/white-rabbit/](../specs/white-rabbit/README.md).
+
+| Doc | What |
+|---|---|
+| [WR overview](wr/README.md) | Implemented modules, verification gates, latency constants |
+| [Enc8b10b](wr/Enc8b10b.md) | 8b/10b codec pair + `riscq.wr` bit conventions |
+| [WrTxPcs](wr/WrTxPcs.md) | TX PCS: framing, CRC16, SOF timestamp trigger, cal pattern |
+| [WrRxPcs](wr/WrRxPcs.md) | RX PCS: sync monitor, frame reassembly, RX timestamp trigger |
+| [RefTimeTsu](wr/RefTimeTsu.md) | Trigger → 64-bit `refTime` timestamp capture unit |
+| [SyncMarker](wr/SyncMarker.md) | `syncTime`-compare scope marker pin |
+| [GtySimPhy](wr/GtySimPhy.md) | The phy contract (`WrPhyIo`) + serial-link simulation model |
+| [WrNode](wr/WrNode.md) | The memory-mapped WR peripheral (register map, CDC, two-node sign-off) |
+| [WrGtyPhy](wr/WrGtyPhy.md) | The real-GTY deterministic PHY (harvested wrappers + reset/bypass/aligner) |
+| [WrSoftware](wr/WrSoftware.md) | `PulseTableSoc(withWhiteRabbit)` attach + `wr.py` exchange/measure/sync software |
 
 ## Analysis & build tooling — `riscq.bench`, `riscq.misc`
 
@@ -126,3 +149,4 @@ with the [software framework overview](software/README.md).**
 | [05 — remote](software/05-remote.md) | Pyro5 server / proxy |
 | [06 — co-sim](software/06-cosim.md) | cocotb backend + qutip ADC injection |
 | [board server](software/board-server.md) | Running riscq on the ZCU216: offline install, bundles, `riscq-board-server`, `RemoteDriver` |
+| [`riscq.cal`](software/cal.md) | The calibration library: sequence · axes · measure · analysis on one batched kernel; writing a calibration; the timing rules; verification tiers |

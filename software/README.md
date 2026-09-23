@@ -38,6 +38,17 @@ Gateware reaches the board as a **bundle** (`top.xsa` + `params.json` + optional
 uploaded over the same Pyro5 connection — `riscq.driver.remote.upload_bundle(drv, name, ...)`,
 then `drv.board.load(name)`. See [specs/software/10-hardware-driver.md](../specs/software/10-hardware-driver.md).
 
+**CMA pre-check.** `load()` allocates the host-window result buffer once per session — 16 MB per
+core, so 224 MB on the 14-qubit build ([specs/software/22](../specs/software/22-host-window.md)).
+Check the kernel's contiguous pool clears it *before* bring-up:
+
+```bash
+grep -i cma /proc/meminfo      # CmaTotal / CmaFree must both exceed qubit_num × 16 MB
+```
+
+`PynqDriver` refuses to construct with a clear message if it does not; the fix is a larger `cma=`
+boot arg in the image (or restarting the server to free a leaked buffer).
+
 ## Tests
 
 ```bash

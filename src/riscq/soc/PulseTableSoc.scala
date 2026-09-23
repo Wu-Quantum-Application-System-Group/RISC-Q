@@ -11,6 +11,11 @@ import spinal.lib.bus.misc.SizeMapping
 import riscq.dsp.{AdderTree, ComplexBatch}
 import riscq.riscv.RiscqParam
 import riscq.soc.fabric.{BramFiber, MemMapDriverFiber}
+import riscq.soc.link.{HostWindowFunnel, PutHub, EventLink, RfCmd}
+import riscq.soc.spec.{CoreSpec, SocSpec, SocSpecMap}
+import riscq.misc.BUFG
+import riscq.wr.WrNode
+import riscq.wr.gty.{WrGtyPhy, WrGtyPhyParams, WrPhyIo}
 import scala.collection.mutable.LinkedHashMap
 import scala.collection.mutable
 
@@ -26,22 +31,23 @@ import scala.collection.mutable
  * logical DAC/ADC **channels** to physical converters (`dacMap`/`adcMap`), summing channels that share
  * a DAC with [[AdderTree]]; and streams a readout trace into `robs` on pulse fire.
  *
+ * Per-core results leave over the **host window** (specs/software/22): each core's write-only 16 MB
+ * window funnels through a [[HostWindowFunnel]] onto `io.hostMem` → the PS DDR4, addressed
+ * `base + (core << 24) + offset` from the `HOSTWIN_BASE_LO/HI` registers of the host control block.
+ *
  * `withTest` exposes each core's CPU data-bus decode (`dMemPortDec`) to a second Tilelink master so a
  * sim can configure the RF (schedule pulses) without a CPU program — in the real SoC the CPU is the
  * sole `dBus` master.
  *
  * @param dacMap (core, channel) → physical DAC id.   @param adcMap core → physical ADC id.
  */
-case class PulseTableSoc(
-    qubitNum: Int,
-    dacMap: Map[(Int, Int), Int],
-    adcMap: Map[Int, Int],
-    dacNum: Int = 16,
-    adcNum: Int = 16,
-    withTest: Boolean = false,
-    vivado: Boolean = false,
-    // RISC-V core plugin config, replicated across all `qubitNum` cores. Defaults to the verified
-    // timing-closure stack for the packed multi-core floorplan, every flag RVLS-bit-exact:
+class PulseTableSoc(
+    val spec: SocSpec,
+    val withTest: Boolean = false,
+    val vivado: Boolean = false,
+    // RISC-V core plugin config, replicated across all cores (each core's `withMul` comes from its
+    // CoreSpec). Defaults to the verified timing-closure stack for the packed multi-core floorplan,
+    // every flag RVLS-bit-exact:
     //   - `gshareMem` moves the GShare 2-bit counter table from a flip-flop array + one-hot write decode
     //     into a synchronous-read LUTRAM (cuts per-core control sets and reset FFs);
     //   - `csrWarl` applies the CSR WARL latitude (trims the reset group);
@@ -50,88 +56,86 @@ case class PulseTableSoc(
     //   - `aluResultOneHot` builds the ALU result mux as a balanced one-hot masked-OR cone (zero IPC);
     //   - `pcRegMaxFanout = 16` replicates the route-dominated fetch predicted-PC register.
     // Pass `RiscqParam()` to A/B the pre-opt core.
-    coreParam: RiscqParam = RiscqParam(gshareMem = true, csrWarl = true,
+    val coreParam: RiscqParam = RiscqParam(gshareMem = true, csrWarl = true,
       aluNoFastForward = true, aluResultOneHot = true, pcRegMaxFanout = 16),
-    // routability levers: readout-drive envelope interpolation (readout = 16) shrinks the widest BRAM
-    // bank 16×. fmax is soft, so the extra latency is acceptable.
-    readoutInterp: Int = 16,
-    gateInterp: Int = 4,
-    // demod-carrier envelope interpolation (default 4 = fully interpolated at adcBatch 4 ⇒ 32-bit line,
-    // direct host wire). Lower for finer per-ADC-lane matched-filter weights; the envelope is typically
-    // square, so the coarse default suffices and keeps the demod bank cheap.
-    demodInterp: Int = 4,
-    // narrow posted-link RF architecture: each core funnels its RF writes onto a per-core posted link
-    // (bridge + `linkPipe` RegNext stages + demux to converter-edge channels), so cores can be
-    // floorplanned far from the converters. `linkPipe` is the per-direction depth.
-    linkPipe: Int = 4,
-    memDepth: Int = 4096,
-    envDepth: Int = 1024,
-    robDepth: Int = 1024,
-    gatePulseNum: Int = 8,
-    // per-parameter TimedQueue depth in every drive/demod PulseGenerator — how many pulses software
-    // can schedule ahead per channel parameter before the queue back-pressures. Deeper = more
-    // scheduled-ahead headroom at a per-queue FF/LUT cost (the six queues per generator × every channel).
-    queueDepth: Int = 4,
-    // specs/dsp-fmax.md converter-edge lever, default off / bit-exact (the B1-alt gate-table distributed
-    // RAM and the B2 dcOffset MAX_FANOUT cap are baked into PulseParamBuffer; the B3 queue lean-pop into
-    // TimedQueue; the C1 registered head is a TimedQueue-level option, no longer plumbed here).
-    adcPipe: Int = 3,                   // C2: register stages on the ADC nets off the RFDC edge
-) extends Zcu216Top(dacNum = dacNum, adcNum = adcNum, dacBatch = 16, adcBatch = 4, dataWidth = 16, vivado = vivado) {
+    // host window (specs/software/22): the PS physical address width.
+    val hostMemAddrWidth: Int = 40,
+) extends Zcu216Top(dacNum = spec.dacNum, adcNum = spec.adcNum, dacBatch = 16, adcBatch = 4, dataWidth = 16, vivado = vivado,
+                    dio = PulseTableSoc.dioNames(spec)) {
+  // Every per-SoC parameter comes from the spec (universal-control/01 P1): the cores' channel lists,
+  // converter ids and memory sizes from their CoreSpecs; the link depth, host-window width, readout
+  // trace depth and the RFDC-edge ADC pipe (specs/dsp-fmax.md C2) from the SoC fields.
+  val qubitNum         = spec.qubitNum
+  val dacNum           = spec.dacNum
+  val adcNum           = spec.adcNum
+  val linkPipe         = spec.linkPipe          // narrow posted-link per-direction RegNext depth
+  val robDepth         = spec.robDepth
+  val hostWinAddrWidth = spec.hostwinBits
+  val adcPipe          = spec.adcPipe
+  val withWhiteRabbit  = spec.withWhiteRabbit   // White Rabbit node window + phy ports (specs/white-rabbit/06)
+  val wrMarkerDac      = spec.wrMarkerDac       // spare DAC carrying the sync marker (white-rabbit/09)
   val N        = 16    // DAC drive batch
   val adcBatch = 4
   val w        = 16
-  val envWidth = N * 2 * w           // 512-bit complex pulse-envelope line
-  val demodEnvFull = adcBatch * 2 * w             // full demod-carrier envelope line (128 at adcBatch 4)
-  val readoutEnvWidth = envWidth / readoutInterp  // interpolated readout-drive envelope line (32 at 16)
-  val gateEnvWidth    = envWidth / gateInterp     // interpolated gate-drive envelope line (128 at 4)
-  val demodEnvWidth   = demodEnvFull / demodInterp // interpolated demod-carrier envelope line (32 at 4)
   val robWidth = adcBatch * 32       // 4 readout lanes × 32-bit (no overflow summing ≤16 ADCs)
 
   // ── host AXI → Tilelink ── blockSize ≥ the widest full-word transfer (the robs WidthAdapter's
   // 128-bit / 16-byte line); each fiber's decoder restricts the size down to what it supports. The
   // write-only envelope banks load 32-bit sub-word (no WidthAdapter), so they never need a wide burst.
-  val bridge = new Axi4ToTilelinkFiber(blockSize = 64, slotsCount = 4)
+  // `slotsCount` also caps how many host reads can be in flight toward a core's instruction/data RAM,
+  // and that cap is what makes `TileLinkCpuMemFiber` legal on that port: the stripped slave never
+  // back-pressures its d channel, which holds only while the d path back to this bridge can absorb
+  // every outstanding response. That path buffers 14 beats — 3 × StreamPipe.FULL (2 each) on
+  // hostBus → riscqMemBus → iMemPortArb, plus the dsp→host FifoCc's dDepth of 8 — so keep
+  // slotsCount well under it (see docs/soc/TileLinkMemFiber.md and specs/software/23 §1.3).
+  val hostSlots = 4
+  require(hostSlots <= 14, s"host slots ($hostSlots) exceed the d-channel buffering to the CPU-mem slave")
+  val bridge = new Axi4ToTilelinkFiber(blockSize = 64, slotsCount = hostSlots)
   bridge.up load io.axi
   val hostBus = Node()
   hostBus at 0 of bridge.down
   hostBus.setDownConnection(a = StreamPipe.FULL, d = StreamPipe.FULL)
 
-  val map = SocMemoryMap(
-    qubitNum        = qubitNum,
-    coreMemBytes    = 1 << 16,
-    pulseMemBytes   = 1 << log2Up(gateEnvWidth * envDepth / 8),      // gate-drive bank (interpolated)
-    readoutEnvBytes = 1 << log2Up(readoutEnvWidth * envDepth / 8),   // readout-drive bank (interpolated)
-    demodEnvBytes   = 1 << log2Up(demodEnvWidth * envDepth / 8),     // demod-carrier bank (interpolated)
-    readoutBufBytes = 2 * (1 << log2Up(robWidth * robDepth / 8))     // 2 robs
-  )
+  val map = SocSpecMap(spec)
+  require(map.robBytes == robWidth * robDepth / 8)
 
-  // The three envelope banks are write-only (BramWriteFiber): each core's fiber steers a 32-bit host
-  // beat straight into the addressed sub-word lane of its wide line, so NO WidthAdapter is needed. The
+  // The envelope banks are write-only (BramWriteFiber): each core's fiber steers a 32-bit host beat
+  // straight into the addressed sub-word lane of its wide line, so NO WidthAdapter is needed. The
   // per-bank regions are decoded off hostBus as NARROW 32-bit fan-out buses, so only 32-bit nets cross
   // the die and every wide envelope net stays local to its core (saving routing). The 32-bit
-  // instruction memory (riscqMemBus) likewise wires direct.
-  val pulseMemBus   = Node()
-  val readoutEnvBus = Node()
-  val demodEnvBus   = Node()
-  val riscqMemBus   = Node()
-  pulseMemBus   at SizeMapping(map.pulseMemBase,   map.regionSize) of hostBus
-  pulseMemBus.setUpConnection(a = StreamPipe.FULL, d = StreamPipe.FULL)
-  readoutEnvBus at SizeMapping(map.readoutEnvBase, map.regionSize) of hostBus
-  readoutEnvBus.setUpConnection(a = StreamPipe.FULL, d = StreamPipe.FULL)
-  demodEnvBus   at SizeMapping(map.demodEnvBase,   map.regionSize) of hostBus
-  demodEnvBus.setUpConnection(a = StreamPipe.FULL, d = StreamPipe.FULL)
+  // instruction memory (riscqMemBus) likewise wires direct. One region per channel slot j (every
+  // core's j-th channel bank, SocSpecMap.slotBases), named after the qubit builds' banks where the
+  // slot is one.
+  val envBuses: Seq[Option[Node]] = (0 until map.nSlots).map { j =>
+    // a slot no core has a bank in (a dio-only slot) gets no region bus: a fabric node needs a slave
+    if (!spec.cores.exists(c => c.channels.length > j && c.channels(j).envBytes > 0)) None else {
+      val bus = Node()
+      bus at SizeMapping(map.slotBases(j), map.regionSize) of hostBus
+      bus.setUpConnection(a = StreamPipe.FULL, d = StreamPipe.FULL)
+      bus.setName(Seq("pulseMemBus", "readoutEnvBus", "demodEnvBus").lift(j).getOrElse(s"envBus$j"))
+      Some(bus)
+    }
+  }
+  val riscqMemBus = Node()
   riscqMemBus   at SizeMapping(map.coreMemBase,    map.regionSize) of hostBus
   riscqMemBus.setUpConnection(a = StreamPipe.FULL, d = StreamPipe.FULL)
 
   val robs = BramFiber(1, robWidth, robDepth, hostCd, dspCd, withOutReg = true)
   val robAdapter = WidthAdapter()
-  robAdapter.up at SizeMapping(map.readoutBufBase, map.regionSize) of hostBus
+  robAdapter.up at SizeMapping(map.robBase, map.regionSize) of hostBus
   robs.up at SizeMapping(0, map.regionSize) of robAdapter.down
   robs.up.setUpConnection(a = StreamPipe.FULL, d = StreamPipe.FULL)
 
   // ── reset/control crossing into the dsp/riscq domain ──
   val riscqReset = Bool()
   val riscqCd    = ClockDomain(dspCd.readClockWire, riscqReset)
+
+  // WR sync-marker drive for the spare DAC: pre-declared so the dspCd DAC combine (inside
+  // riscqArea) can consume it — the WrNode that drives it is created after riscqArea (it needs
+  // riscqArea.refTime). Assigned in the White Rabbit section below.
+  require(wrMarkerDac.forall(d => withWhiteRabbit && d >= 0 && d < dacNum),
+    s"wrMarkerDac=$wrMarkerDac needs withWhiteRabbit and a valid DAC id")
+  val wrMarkerPulse = (withWhiteRabbit && wrMarkerDac.isDefined) generate Bool()
 
   /** Converter-boundary pipeline: `converterPipe` extra register stages on the long DAC/ADC nets
    *  into/out of the RFDC edge. converterPipe = 0 ⇒ identity (no behavioural change). */
@@ -161,16 +165,16 @@ case class PulseTableSoc(
       t
     }
 
-    val cp = coreParam.copy(
-      fetchPcWidth = Some(log2Up(memDepth) + 2),
-      fetchLatency = 4)
-    val riscqCores = List.tabulate(qubitNum)(i =>
+    def cp(core: CoreSpec) = coreParam.copy(
+      fetchPcWidth = Some(log2Up(core.memDepth) + 2),
+      fetchLatency = 4,
+      withMul = core.withMul)
+    val riscqCores = spec.cores.toList.zipWithIndex.map { case (core, i) =>
       RiscqRfWithPulseTableFiber(
-        plugins = cp.plugins(), dspCd = dspCd, hostCd = hostCd, riscqCd = riscqCd,
+        spec = core, plugins = cp(core).plugins(), dspCd = dspCd, hostCd = hostCd, riscqCd = riscqCd,
         time = coreTimes(i), batchSize = N, dataWidth = w, adcBatch = adcBatch,
-        envDepth = envDepth, readoutInterp = readoutInterp, gateInterp = gateInterp, demodInterp = demodInterp,
-        linkPipe = linkPipe, withTestTap = withTest, memDepth = memDepth, gatePulseNum = gatePulseNum,
-        queueDepth = queueDepth))
+        linkPipe = linkPipe, hostWinAddrWidth = hostWinAddrWidth,
+        withTestTap = withTest) }
 
     // floorplan: keep each core's RiscvSoc a hard synth boundary so opt can't merge logic across the
     // identical cores into a MUXF7/F8 macro that straddles two per-core pblocks. The shared host AXI fans
@@ -178,18 +182,30 @@ case class PulseTableSoc(
     // between cores. Synthesis-only attribute — zero behavioural change, sims ignore it.
     riscqCores.foreach(_.riscvSoc.addAttribute("KEEP_HIERARCHY", "TRUE"))
 
-    // host fan-out: per-core instruction memory + the three write-only envelope banks all wire DIRECT to
-    // their narrow 32-bit region bus — each envelope fiber bridges a 32-bit host beat into its wide line
-    // locally (no WidthAdapter). Offsets are relative to each region bus (rebased 0).
+    // ── the board hub (specs/cross-core/02 §4): every core's system puts in, one ordered broadcast
+    // out, replicated per core (valid gated by that core's mask bit) and piped like the RF link. It
+    // lives in riscqCd so a run boundary (riscqReset) clears its boards, barrier counts and flags.
+    val hub = riscqCd(PutHub(cores = qubitNum, board = spec.board, boards = spec.boards))
+    for ((core, i) <- riscqCores.zipWithIndex) hub.in(i) << core.xput
+    hub.time := RegNext(syncTime(0, 32 bits))
+    for ((core, i) <- riscqCores.zipWithIndex) {
+      val mine = Flow(RfCmd(EventLink.inboxAddrWidth))
+      mine.valid   := hub.out.valid && hub.out.payload.mask(i)
+      mine.payload := hub.out.payload.put
+      core.hubIn << core.getPipe(mine, linkPipe)
+    }
+
+    // host fan-out: per-core instruction memory + every write-only envelope bank wire DIRECT to their
+    // narrow 32-bit region bus — each envelope fiber bridges a 32-bit host beat into its wide line
+    // locally (no WidthAdapter). Offsets are relative to each region bus (rebased 0); the core's j-th
+    // bank sits in slot region j at the slot's stride.
     for ((core, i) <- riscqCores.zipWithIndex) {
       core.iMemPortArb        at SizeMapping(i * map.coreStride,       map.coreStride)       of riscqMemBus
       core.iMemPortArb.setUpConnection(a = StreamPipe.FULL, d = StreamPipe.FULL)
-      core.pulseMemFiber.up   at SizeMapping(i * map.pulseStride,      map.pulseStride)      of pulseMemBus
-      core.pulseMemFiber.up.setUpConnection(a = StreamPipe.FULL, d = StreamPipe.FULL)
-      core.readoutMemFiber.up at SizeMapping(i * map.readoutEnvStride, map.readoutEnvStride) of readoutEnvBus
-      core.readoutMemFiber.up.setUpConnection(a = StreamPipe.FULL, d = StreamPipe.FULL)
-      core.demodMemFiber.up   at SizeMapping(i * map.demodEnvStride,   map.demodEnvStride)   of demodEnvBus
-      core.demodMemFiber.up.setUpConnection(a = StreamPipe.FULL, d = StreamPipe.FULL)
+      for ((Some(mem), j) <- core.envMems.zipWithIndex) {   // bank-less slots (dio) stay holes
+        mem.up at SizeMapping(i * map.slotStrides(j), map.slotStrides(j)) of envBuses(j).get
+        mem.up.setUpConnection(a = StreamPipe.FULL, d = StreamPipe.FULL)
+      }
     }
 
     // optional test masters so a sim can drive each core's RF/control (CPU is held in reset). Each core
@@ -214,11 +230,11 @@ case class PulseTableSoc(
     // per DAC — a single channel is a pass-through (0), an n-channel sum costs `AdderTree.latency(n)+1` —
     // so pad each path up to the deepest one.
     //
-    // NB: `.toList` BEFORE `.collect` — collecting `(c, ch)` tuples straight off the Map would rebuild a
-    // Map[c, ch], so two channels of the same core (gate ch0 + readout ch1) would collide on key `c` and
-    // the gate would be silently dropped. On a List the result is a plain List[pulse].
+    // Channels are addressed by (core, k) with k the channel's index among the core's DAC-bound
+    // channels (the order of `RiscqRfWithPulseTableFiber.dac`), straight from the spec.
     val dacChannels = (0 until dacNum).map { dacId =>
-      dacMap.toList.collect { case ((c, ch), id) if id == dacId => riscqCores(c).dac(ch) }
+      spec.cores.toList.zipWithIndex.flatMap { case (core, c) =>
+        core.channels.flatMap(_.dac).zipWithIndex.collect { case (d, k) if d == dacId => riscqCores(c).dac(k) } }
     }
     def combineLatency(n: Int) = if (n <= 1) 0 else AdderTree.latency(n) + 1
     val dacAlignStages = dacChannels.map(p => combineLatency(p.size)).max
@@ -226,7 +242,13 @@ case class PulseTableSoc(
     val dacPayloads = dacChannels.zipWithIndex.map { case (pulses, dacId) =>
       val payload = cloneOf(io.dac(dacId).payload)
       io.dac(dacId).payload := pipe(payload, 1)   // one shared stage into the RFDC edge
-      if (pulses.isEmpty) {
+      if (withWhiteRabbit && wrMarkerDac.contains(dacId)) {
+        require(pulses.isEmpty, s"wrMarkerDac=$dacId collides with a dacMap channel")
+        // scope-visible sync marker on a spare converter: full-scale while the marker is high.
+        // One RegNext + the shared RFDC stage = a constant, board-identical delay from the
+        // syncTime compare (any residual mismatch lands in the role-swap ε).
+        payload := RegNext(Mux(wrMarkerPulse, Vec.fill(N)(B(0x7FFF, w bits)).asBits, B(0, N * w bits)))
+      } else if (pulses.isEmpty) {
         payload := 0                              // no generator maps here — nothing to align
       } else {
         val combined =
@@ -247,6 +269,7 @@ case class PulseTableSoc(
 
     // ── ADC: buffer the real lanes of only the MAPPED converters, fan to the mapped cores (im = 0).
     // Unmapped physical ADCs are left untouched — no buffer registers, no contribution to the trace. ──
+    val adcMap: Map[Int, Int] = spec.adcMap            // core → the adc of its demod channel
     val mappedAdcIds = adcMap.values.toList.distinct.sorted
     val adcBufs = mappedAdcIds.map { adcId =>
       val a = Vec.fill(adcBatch)(SInt(w bits))
@@ -257,8 +280,15 @@ case class PulseTableSoc(
       (riscqCores(coreId).adc zip adcBufs(adcId)).foreach { case (o, i) => o.re := i; o.im := 0 }
     }
 
-    // ── readout trace into robs on any drive-pulse fire ──
-    val anyPulseValid = riscqCores.map(_.readoutPulse.valid).reduceBalancedTree(_ | _, (s, _) => RegNext(s))
+    // ── timed-DIO banks straight to the board ports (no converter, no map) ──
+    for ((core, c) <- riscqCores.zipWithIndex; (ch, d) <- core.dios) {
+      val k = PulseTableSoc.dioNames(spec).indexOf(s"${spec.cores(c).name}_${ch.name}")
+      io.dioOut(k) := d.io.dout
+      d.io.din := io.dioIn(k)
+    }
+
+    // ── readout trace into robs on any traced (readout-drive) pulse fire ──
+    val anyPulseValid = riscqCores.flatMap(_.tracePulses.map(_.valid)).reduceBalancedTree(_ | _, (s, _) => RegNext(s))
     val fire   = RegNext(anyPulseValid)
     val rbAddr = Reg(UInt(log2Up(robDepth) bits))
     when(fire)(rbAddr := rbAddr + 1).otherwise(rbAddr := 0)
@@ -270,6 +300,12 @@ case class PulseTableSoc(
     rb0.address := RegNext(rbAddr); rb0.write := fire
     rb0.wdata   := Vec(adcSum).asBits
   }
+
+  // ── host window: every core's posted result stream → one write-only AXI master → PS DDR4 ──
+  // hostCd logic, outside every core's hard band; `io.hostMem` goes to `S_AXI_HP0_FPD`.
+  val hostWindow = HostWindowFunnel(qubitNum, hostWinAddrWidth, hostMemAddrWidth)
+  for ((core, i) <- riscqArea.riscqCores.zipWithIndex) hostWindow.io.cmd(i) << core.hostCmd
+  io.hostMem << hostWindow.io.axi
 
   // ── host control block (host clock domain) ──
   val riscqResetHostCd = Bool()
@@ -283,15 +319,92 @@ case class PulseTableSoc(
   val timeOffset = Reg(UInt(64 bit)) init 0
   riscqArea.timeOffset := dspCd(BufferCC(timeOffset))
 
+  // Host-window base: the PS *physical* address of the result buffer, split LO/HI like `timeOffset`.
+  // `enable` powers up LOW so a core storing to the window before the host has programmed `base` stalls
+  // visibly instead of writing DDR address 0 (the kernel's memory). `setup` writes both words while
+  // `riscqReset` is asserted, so the funnel is idle when the 40-bit address changes — no torn base.
+  val hostWinBaseLo = Reg(UInt(32 bits)) init 0
+  val hostWinBaseHi = Reg(UInt(hostMemAddrWidth - 32 bits)) init 0
+  val hostWinEnable = Reg(Bool()) init False
+  hostWindow.io.base   := hostWinBaseHi @@ hostWinBaseLo
+  hostWindow.io.enable := hostWinEnable
+
+  // Run-completion flags (specs/software/23), one bit per core: each core's sticky `done` level is
+  // crossed into `hostCd` and packed into one read-only word, so `poll_done` reads ONE address for the
+  // whole SoC instead of a `__rq_status` word out of every core's RAM. `riscqReset` clears the source
+  // registers, so the word self-clears at the run boundary — the driver never writes it. The crossing
+  // is a per-bit BufferCC: the bits are independent levels, so no coherence between them is needed,
+  // and dspClk/hostClk are an asynchronous clock group (constraints-zcu216.xdc), so this arc is not
+  // timed against the 500 MHz path.
+  require(qubitNum <= 32, s"the host control block's DONE word carries one bit per core, got qubitNum=$qubitNum")
+  val doneHostCd = Bits(qubitNum bits)
+  for ((core, i) <- riscqArea.riscqCores.zipWithIndex) doneHostCd(i) := BufferCC(core.done, False)
+  val hubMismatchHostCd = BufferCC(riscqArea.hub.countMismatch, False)   // sticky until riscqReset
+
   val hostCtrlDriver = MemMapDriverFiber(addressWidth = 10, dataWidth = 32, driveProc = { factory =>
     factory.drive(riscqResetHostCd, 0)
+    factory.read(doneHostCd, 0x50)                     // DONE: bit i = core i has finished
+    factory.read(hubMismatchHostCd, 0x54)              // HUB_STATUS: bit 0 = a barrier's counts disagreed
     factory.write(timeOffset(0, 32 bits), 64)
     factory.write(timeOffset(32, 32 bits), 68)
+    factory.write(hostWinBaseLo, 72)                        // HOSTWIN_BASE_LO = base[31:0]
+    factory.write(hostWinBaseHi, 76, 0)                     // HOSTWIN_BASE_HI[7:0]  = base[39:32]
+    factory.write(hostWinEnable, 76, 31)                    // HOSTWIN_BASE_HI[31]   = enable
   })
   hostCtrlDriver.up.setUpConnection(a = StreamPipe.FULL, d = StreamPipe.FULL)
   hostCtrlDriver.up at SizeMapping(map.hostCtrlBase, map.regionSize) of hostBus
 
+  // ── White Rabbit node (specs/white-rabbit/06): the syncTime-alignment peripheral as a register
+  // window at map.wrBase — the hostCtrlDriver idiom. On sim builds (`vivado = false`) the phy
+  // contract is a toplevel port driven by the GtySimPhy model (WrNodeSim, the cocotb bench); the
+  // vivado build instantiates the real WrGtyPhy (W4) and exposes the GTY board pins instead. ──
+  val wrPhy    = (withWhiteRabbit && !vivado) generate slave(WrPhyIo())
+  val wrMarker = withWhiteRabbit generate (out Bool ())
+  val wrRefClkP, wrRefClkN, wrRxP, wrRxN = (withWhiteRabbit && vivado) generate (in Bool ())
+  val wrTxP, wrTxN                       = (withWhiteRabbit && vivado) generate (out Bool ())
+  val wrGtyPhy = (withWhiteRabbit && vivado) generate {
+    // clk_free for the GT bring-up FSMs: hostClk/2 through a BUFG (PG182: ≤ 62.5 MHz with both
+    // buffers bypassed, W4 harvest note). The FF divider is constrained by name via the
+    // create_generated_clock in vivado-scripts/riscvsoc-bd/constraints-wr.xdc.
+    val div = hostCd { val r = Reg(Bool()) init False; r := !r; r }
+    div.setName("wrClkFreeDiv")
+    val bufg = BUFG()
+    bufg.I := div
+    val freeCd = ClockDomain(bufg.O, config = ClockDomainConfig(resetKind = BOOT),
+      frequency = FixedFrequency(50 MHz))
+    val gty = freeCd(WrGtyPhy(WrGtyPhyParams()))
+    gty.io.refClkP := wrRefClkP
+    gty.io.refClkN := wrRefClkN
+    gty.io.rxP := wrRxP
+    gty.io.rxN := wrRxN
+    wrTxP := gty.io.txP
+    wrTxN := gty.io.txN
+    gty
+  }
+  val wrNode = withWhiteRabbit generate WrNode(if (vivado) wrGtyPhy.io.phy else wrPhy,
+    riscqArea.refTime, riscqArea.syncTime, hostCd, dspCd)
+  // the hub's lane: the put frames ride the WR link (specs/cross-core/02 §5); no link ⇒ tied off
+  if (withWhiteRabbit) {
+    wrNode.putTx << riscqArea.hub.laneOut
+    riscqArea.hub.laneIn << wrNode.putRx
+  } else {
+    riscqArea.hub.laneOut.ready := True
+    riscqArea.hub.laneIn.valid := False
+    riscqArea.hub.laneIn.payload.assignDontCare()
+  }
+  if (withWhiteRabbit) {
+    wrMarker := wrNode.marker
+    if (wrMarkerDac.isDefined) wrMarkerPulse := wrNode.marker
+    // near-end PMA loopback (CTRL[4]) for the W6 single-board self-test: a quasi-static host
+    // level — software sets it in the same CTRL write that releases resetAll, so it is stable
+    // before the sequenced GT resets deassert (UG578: change LOOPBACK, then reset).
+    if (vivado) wrGtyPhy.io.loopback := wrNode.ctrl.pmaLoopback ? B"010" | B"000"
+    wrNode.regs.up.setUpConnection(a = StreamPipe.FULL, d = StreamPipe.FULL)
+    wrNode.regs.up at SizeMapping(map.wrBase, map.regionSize) of hostBus
+  }
+
   Fiber build new Area {
+    riscqArea.refTime.simPublic() // sims force/observe the free-running counter (e.g. WrNodeSim's 2^32 crossing)
     riscqArea.riscqCores(0).riscvSoc.dMemPortDec.bus.get.simPublic()
     if (withTest) {
       riscqArea.time.simPublic()
@@ -299,6 +412,47 @@ case class PulseTableSoc(
       riscqArea.testMasters.foreach(_.node.bus.get.simPublic())
     }
   }
+}
+
+object PulseTableSoc {
+  /** the board-port names of every timed-DIO channel, `<core>_<channel>`, in spec order */
+  def dioNames(spec: SocSpec): Seq[String] =
+    spec.cores.flatMap(c => c.channels.filter(_.kind == "dio").map(ch => s"${c.name}_${ch.name}"))
+
+  /** The qubit-build constructor the sims, benches and generators call: `qubitNum` identical gate /
+    * ro / demod cores with the given converter maps — `SocSpec.qubits` under the hood. */
+  def apply(
+      qubitNum: Int,
+      dacMap: Map[(Int, Int), Int],
+      adcMap: Map[Int, Int],
+      dacNum: Int = 16,
+      adcNum: Int = 16,
+      withTest: Boolean = false,
+      vivado: Boolean = false,
+      coreParam: RiscqParam = RiscqParam(gshareMem = true, csrWarl = true,
+        aluNoFastForward = true, aluResultOneHot = true, pcRegMaxFanout = 16),
+      readoutInterp: Int = 16,
+      gateInterp: Int = 4,
+      demodInterp: Int = 4,
+      linkPipe: Int = 4,
+      memDepth: Int = 4096,
+      envDepth: Int = 1024,
+      robDepth: Int = 1024,
+      gatePulseNum: Int = 8,
+      queueDepth: Int = 4,
+      adcPipe: Int = 3,
+      hostWinAddrWidth: Int = 24,
+      hostMemAddrWidth: Int = 40,
+      withWhiteRabbit: Boolean = false,
+      wrMarkerDac: Option[Int] = None): PulseTableSoc =
+    new PulseTableSoc(
+      SocSpec.qubits(qubitNum, dacMap, adcMap, dacNum = dacNum, adcNum = adcNum,
+        gatePulseNum = gatePulseNum, envDepth = envDepth, gateInterp = gateInterp,
+        readoutInterp = readoutInterp, demodInterp = demodInterp, memDepth = memDepth,
+        withMul = coreParam.withMul, queueDepth = queueDepth, linkPipe = linkPipe,
+        hostwinBits = hostWinAddrWidth, robDepth = robDepth, adcPipe = adcPipe)
+        .copy(withWhiteRabbit = withWhiteRabbit, wrMarkerDac = wrMarkerDac),
+      withTest, vivado, coreParam, hostMemAddrWidth)
 }
 
 /**

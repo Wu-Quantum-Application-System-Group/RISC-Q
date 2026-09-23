@@ -9,15 +9,17 @@ has drifted from the paper's FAST DRAG.
 import numpy as np
 import pytest
 
-from riscq.cal import Config
+from riscq.cal import Config, Leakage
+from riscq.cal.analysis.drag import N_GRID, PAD, W_GRID, ef_spectral_weight, optimize_fast_drag
 from riscq.cal.base import GATE_CH, batches
-from riscq.cal.drag import N_GRID, PAD, W_GRID, ef_spectral_weight, optimize_fast_drag
 from riscq.map import SocMap, SocParams
 from riscq.pulses import envelopes
 
 from pathlib import Path
 
-PARAMS = SocParams.load(Path(__file__).resolve().parents[1] / "configs" / "zcu216-14q.json")
+CONFIGS = Path(__file__).resolve().parents[1] / "configs"
+SIM2Q = CONFIGS / "sim-2q.json"
+PARAMS = SocParams.load(CONFIGS / "zcu216-14q.json")
 M = SocMap(PARAMS)
 
 
@@ -129,7 +131,7 @@ _MEANS = np.array([[10.0, 0.0], [-5.0, 8.66], [-5.0, -8.66]])      # |0>/|1>/|2>
 
 
 def _clf(seed=3):
-    from riscq.cal.readout import ClassifierN
+    from riscq.cal.analysis.classifier import ClassifierN
     rng = np.random.default_rng(seed)
     return ClassifierN([_MEANS[k] + 0.1 * rng.standard_normal((30, 2)) for k in range(3)])
 
@@ -141,13 +143,6 @@ def _levels_iq(p, shots):
     iq[:n2] = _MEANS[2]
     iq[n2:] = _MEANS[1]
     return iq.reshape(-1)
-
-
-class _StubDrv:                                        # socmap(drv) reads drv.sim.get_params()
-    class sim:
-        @staticmethod
-        def get_params():
-            return (Path(__file__).resolve().parents[1] / "configs" / "sim-2q.json").read_text()
 
 
 def _leakage_cfg(q=0):
@@ -165,61 +160,55 @@ def _leakage_cfg(q=0):
     return c
 
 
-def test_leakage_picks_the_minimum_of_a_planted_p2(monkeypatch):
-    """(F3 gate) `Leakage` end-to-end host-pure: the driver is stubbed at rq.run and P(|2>) is a
-    planted parabola over the swept virtual-Z pair. The class's REAL per-point compile (a deep n×X90
-    train), the ClassifierN decode and the argmin write-back all run — and it must pick the planted
-    minimum, recompiling once per point because a vz pair is a kernel binding, not a slot field."""
-    from riscq import run as rqrun
-    from riscq.cal.drag import Leakage
+def test_leakage_picks_the_minimum_of_a_planted_p2(responder):
+    """(F3 gate) `Leakage` end-to-end host-pure: P(|2>) is a planted parabola over the swept
+    virtual-Z pair, answered through the responder. The class's REAL per-point compile (a deep
+    n×X90 train), the ClassifierN decode and the argmin write-back all run — and it must pick the
+    planted minimum, recompiling once per point because a vz pair is baked into the gate table,
+    not a runtime param."""
+    r = responder(SIM2Q)
     cfg = _leakage_cfg()
     phases = [-0.2, -0.1, 0.0, 0.1, 0.2]
     star = 0.1                                          # the planted least-leaky phase
-    state = {"runs": 0, "vz": []}
+    state = {"runs": 0}
 
-    def fake_run(drv, m_, progs, params=None, results=None, timeout=0):
-        p = 0.05 + 2.0 * (phases[state["runs"]] - star) ** 2
+    @r.answer
+    def _(progs, params):
+        p = 0.05 + 2.0 * (phases[state["runs"] % len(phases)] - star) ** 2
         state["runs"] += 1
-        return {0: {"out": _levels_iq(p, 8)}}
+        return {q: {"out": _levels_iq(p, int(prog.bindings["shots"]))}
+                for q, prog in progs.items()}
 
-    monkeypatch.setattr(rqrun, "run", fake_run)
-    cal = Leakage(cfg, 0, _clf(), "qubit/{q}/x90/vz", [[p, p] for p in phases], n_gates=8, shots=8)
-    r = cal.run(_StubDrv())
+    res = Leakage(cfg, 0, _clf(), "qubit/{q}/x90/vz", [[p, p] for p in phases],
+                  n_gates=8, shots=8).run(r.drv)
 
-    assert state["runs"] == len(phases)                 # ONE compile + run per point
-    assert r.proposal == {"qubit/0/x90/vz": [star, star]}
-    assert r.data[0]["y"].argmin() == phases.index(star)
+    assert state["runs"] == len(phases) == len(r.setups)     # ONE compile + run per point
+    assert res.proposal == {"qubit/0/x90/vz": [star, star]}
+    assert res.data[0]["y"].argmin() == phases.index(star)
     assert cfg["qubit/0/x90/vz"] == [0.0, 0.0]          # the original config is untouched
-    print(f"\n[leakage] P(2)={np.round(r.data[0]['y'], 3).tolist()} -> vz={r.proposal['qubit/0/x90/vz']}")
+    print(f"\n[leakage] P(2)={np.round(res.data[0]['y'], 3).tolist()} -> "
+          f"vz={res.proposal['qubit/0/x90/vz']}")
 
     # maximize=True is qcal's diagnostic direction — the same sweep, the other extremum
     state["runs"] = 0
     rmax = Leakage(cfg, 0, _clf(), "qubit/{q}/x90/vz", [[p, p] for p in phases], n_gates=8, shots=8,
-                   maximize=True).run(_StubDrv())
+                   maximize=True).run(r.drv)
     assert rmax.proposal == {"qubit/0/x90/vz": [-0.2, -0.2]}
 
 
-def test_leakage_captures_in_the_classifiers_zero_demod_frame(monkeypatch):
-    """(spec 14 finding 7) `Leakage` reads P(|2>) through a pre-trained `ClassifierN`, whose training
-    captures are deliberately zero-frame (`_rawiq_prog`/`_ef_prep_prog` bake `phase=0.0`). A
-    config-frame capture would arrive rotated by the stored demod phase relative to the classifier's
-    means — 0 on the co-sim configs, −109.9°…+39.0° on X6Y3 — so the train must capture at phase 0
-    too. (The res-bit cals are the deliberate opposite: there the stored phase IS the discriminator.)"""
-    from riscq import run as rqrun
-    from riscq.cal import base as cal_base
-    from riscq.cal import drag as cal_drag
-    from riscq.cal.drag import Leakage
+def test_leakage_captures_in_the_classifiers_zero_demod_frame(responder):
+    """(spec 14 finding 7) `Leakage` reads P(|2>) through a pre-trained `ClassifierN`, whose
+    training captures are deliberately zero-frame (`Measure.levels` pins `phase=0.0`). A
+    config-frame capture would arrive rotated by the stored demod phase relative to the
+    classifier's means — 0 on the co-sim configs, −109.9°…+39.0° on X6Y3 — so the train must
+    capture at phase 0 too. (The res-bit cals are the deliberate opposite: there the stored phase
+    IS the discriminator.) Asserted on the compiled demod slot, which is where the frame is baked."""
+    r = responder(SIM2Q)
     cfg = _leakage_cfg()
     cfg["readout/0/demod/phase"] = -1.918                # the config frame the res bit would use
-    seen = []
-    real = cal_base.readout_tables
-
-    def recorder(cfg_, q, m_, phase=None, win=None):
-        seen.append(phase)
-        return real(cfg_, q, m_, phase=phase, win=win)
-
-    monkeypatch.setattr(cal_drag, "readout_tables", recorder)
-    monkeypatch.setattr(rqrun, "run", lambda *a, **k: {0: {"out": _levels_iq(0.1, 8)}})
-    Leakage(cfg, 0, _clf(), "qubit/{q}/x90/vz", [[0.0, 0.0], [0.1, 0.1]], n_gates=4, shots=8) \
-        .run(_StubDrv())
-    assert seen == [0.0, 0.0]                            # one compile per swept point
+    r.answer(lambda progs, params: {q: {"out": _levels_iq(0.1, int(p.bindings["shots"]))}
+                                    for q, p in progs.items()})
+    Leakage(cfg, 0, _clf(), "qubit/{q}/x90/vz", [[0.0, 0.0], [0.1, 0.1]], n_gates=4,
+            shots=8).run(r.drv)
+    assert len(r.setups) == 2                            # one compile per swept point
+    assert [prog.tables["tbl_demod"][0][0] for s in r.setups for prog in s.values()] == [0, 0]

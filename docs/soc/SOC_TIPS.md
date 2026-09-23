@@ -117,6 +117,31 @@ One array, two clocked ports ⇒ Verilator errors `MULTIDRIVEN`. Any sim instant
 `DualClockRam.mem` is `Verilator.public` ⇒ `dut.<path>.mem.setBigInt(wordIndex, value)`. The address is
 the **word index**, not a byte address.
 
+### 3.8 Never hand-roll a ready-toggling Stream monitor in a woken thread — use `StreamReadyRandomizer`/`StreamMonitor`
+The tempting pattern
+
+```scala
+fork { while (true) {
+  val ready = rng.nextInt(20) != 0
+  io.stream.ready #= ready
+  if (ready && io.stream.valid.toBoolean) record(io.stream.payload)   // WRONG
+  cd.waitSampling()
+} }
+```
+
+**races**: a thread's `#=` takes effect one edge **later** than its same-wake reads assume, so the DUT
+fires at an edge where the monitor believed `ready` was low (byte lost) and stalls where it believed
+high (byte recorded twice). Net effect on a byte stream: length preserved but byte *i* replaced by
+byte *i+1* around every ready toggle — looks exactly like a DUT buffer bug (cost a full debug session
+in `WrPcsLoopSim`; the slot RAM + wire were bit-clean, only the recording slipped). With a **constant**
+ready the pattern is harmless, which is why it survives in simple sims. For randomized back-pressure
+always use the callback pair, which samples `valid && ready && payload` in one coherent phase:
+
+```scala
+StreamReadyRandomizer(io.stream, cd).factor = 0.95f
+StreamMonitor(io.stream, cd) { p => record(p) }
+```
+
 ---
 
 ## 4. Driving the qubit core without a CPU program
@@ -212,6 +237,24 @@ CPU is the sole `dBus` master). Mechanics that bit:
   must stay `≤ 32` to read the integral back in one TL word. The window length is the **demod pulse's
   `dur`** (16-bit field), so the bound is a *software* contract: the driver rejects a demod-table
   `dur > 2^maxWinLog2` (default 2^14) — hardware can no longer clamp it with a narrow field width.
+- **A fire pushed with less than `LEAD` to spare plays with the PREVIOUS pulse's parameters — it is
+  neither dropped nor flagged.** Measured 2026-09-14 (universal-cal V0 parity): the generator latches
+  the queue head's params `lead` before start, so a late-arriving fire is played at its own `startTime`
+  but with whatever params were latched last (silent after a fresh boot, the last pulse's amp/env/dur
+  otherwise), and every later fire in the chain is one pulse behind. The heralded grid is the sharp
+  edge: `herald_offset` leaves the post-herald drive exactly `LEAD` after the herald window closes, and
+  the old kernels fit only because the shot path between `read_res()` and the fire is a handful of
+  instructions — four volatile RAM loads (runtime params passed straight into a call) were enough to
+  tip it. Keep the shot path free of loads (copy params into locals before the loop, `k_batched`), and
+  suspect this whenever a sweep looks "shifted by one point".
+- **Per-core `now() + period` grids are NOT aligned across cores — start a multi-core grid from a
+  barrier.** Measured 2026-09-15 (universal-cal V5 parity, `tests/test_parity_2q.py`): cores that
+  release together and read `now()` after identical preambles still landed 2–23 batches apart, the
+  offset growing with the program (the old `k_cz_cond` fired the two lines of a drive-form CZ 14
+  batches apart; a coupler-form sweep 7–10). The put network's `barrier(id, count)` returns ONE
+  released time to every member, so `t_ro = barrier(grp) + period` gives every core of an
+  experiment the same grid exactly (`riscq.cal.batched.k_batched`; a one-core experiment is a
+  one-member group). Never compare cross-core timing on `now()`-anchored programs.
 - **Readout pacing (carrier-triggered decoder).** The demod carrier's `valid` is the decoder window
   ([specs/new-readout-decoder](../../specs/new-readout-decoder/README.md)); the decoder's `res.valid` is
   forwarded up as a **level** the sink mirrors, so `read_res` is **idempotent** (no arm, no consume).
@@ -250,6 +293,21 @@ CPU is the sole `dBus` master). Mechanics that bit:
   `startTime` to `now()` (or the pulse's `t`), never 0. Deterministic repro without hardware: write
   `timeOffset ≥ 2^31` to the host control block so `io.time` lands in the upper half — the old
   `set_start(0)` schedule then fails while the `now()` schedule still tracks.
+- **`wait_until` released early across the 2^32 time wrap — a run's RAW shots collapse to ONE repeated IQ
+  value from some shot index on, on every core at once (fixed 2026-09-18).** *Symptom:* on hardware only,
+  intermittently (~`run_seconds / 8.6` of runs), a contiguous tail or stretch of a rerun's shots carries
+  the same `real/imag` pair on all cores, starting at the same shot index everywhere and ending at a
+  different index per core; the `ReadoutCalibration` hexbin shows one black dot with ghost clouds. Looks
+  like a readback/DMA fault but survives `host=False`. *Cause:* `TimeMemMap.waitTimeCmp` was the unsigned
+  `time + 3 < timeCmp`. On the shot where `t_ro + tail` crosses 2^32 while `time` has not, `timeCmp` is
+  tiny and the halt releases at once — for up to one grid period every `wait_until` is a no-op, the CPU
+  runs the shot loop flat out, its pulse posts overflow the depth-4 `TimedQueue`s down the no-back-pressure
+  RF `Flow` (dropped, never played) and `read_real/imag` return the latest-value sink's last real shot every
+  iteration. When `time` wraps too the compare works again, the CPU waits out the lead it built up, and
+  the run finishes normally. *Fix:* the halt is now the signed distance `(timeCmp − (time + 3)).asSInt > 0`
+  (`ControlMemMaps.scala`), wrap-safe within ±2^31 like the `TimedQueue` test above; `ControlMapFiberSim`
+  holds a read across the wrap. Detector for old bundles: `np.unique(iq, axis=0, return_counts=True)` on a
+  RAW capture — a max count in the hundreds is this.
 - *(Historical — the armed decoder, removed by the carrier-triggered rewrite.)* The old software-armed
   window had a startTime-before-`dur` ordering contract whose violation latched a stale previous-shot
   window that silently survived resets (`decStartTime` lived in `dspCd`); a matched readout then collapsed
@@ -512,3 +570,180 @@ launch_runs synth_1 -jobs 8   ;# now launches the already-created, already-confi
 re-synthesises with the arg — no stale-cache trap. The `RISCQ_CSET_THRESH` / `RISCQ_IP_RETIMING` knobs in
 `riscvsoc-bd/inc/run.tcl` do exactly this. (A flat top would instead carry the cores in `synth_1`, where
 `synth_1` args apply directly.)
+
+### 8.8 A cross-clock FIFO's push side must NOT sit in `riscqCd` — the per-run reset desyncs it
+
+**Symptom (avoided by design):** a `StreamFifoCC` whose push domain is `riscqCd` and whose pop domain is
+`hostCd` starts emitting garbage after the second run.
+**Cause:** `riscqCd` is `dspCd`'s clock with the **per-run core reset**. A cross-clock FIFO's occupancy is
+`pushPtr − popPtr` compared across the domains; asserting `riscqReset` zeroes only the push pointer, so
+the pop side reads a huge fake occupancy and drains stale/never-written entries.
+**Fix:** put the push side in `dspCd` (same clock, board-level reset only) and let the riscqCd logic drive
+its push port combinationally — `RiscqRfWithPulseTableFiber.hostWinFifo` does exactly this, and there is
+already precedent for dspCd registers fed from riscqCd logic (`getPipe(riscvSoc.cmd, linkPipe)`). Beats
+are atomic, so a mid-run reset just drops `valid`; whatever was already accepted drains harmlessly.
+See [HostWindow](HostWindow.md).
+
+### 8.9 The cores run BEFORE the host asserts `riscqReset`, and a wrapped PC finds a freshly loaded program
+
+**Symptom:** a CPU-in-the-loop sim that backdoor-loads a program, *then* pulses `riscqReset`, sees the
+program's first stores twice — once from a phantom early run.
+**Cause:** `riscqResetHostCd` is a `SlaveFactory.drive` register that powers up **deasserted**, so
+`riscqReset` releases as soon as `dspRst` does — long before the testbench's first AXI write. The cores
+fetch all-zero (illegal) words whose PC **wraps** the 16 KB RAM (`fetchPcWidth = log2Up(memDepth) + 2`),
+so the moment the image lands in RAM the wrapped PC runs it, against whatever state the run needs.
+**Fix in a testbench:** write `riscqReset = 1` as the **first** AXI transaction, before loading anything
+(this is what `riscq.run.setup` does on hardware), and clear any sim-side observation state just before
+releasing. `HostWindowCpuSim` does both; `PulseTableSocCpuSim` predates the issue and is unaffected only
+because its phantom run cannot reach a converter.
+
+### 8.10 Host-window results are POSTED — never read the buffer from compiled or C code
+
+**The rule:** the host result buffer ([HostWindow](HostWindow.md)) is read from **python, after
+`poll_done`** — never from a program or from C straight after the status read.
+**Why:** every stage of the window path is posted. A core sees a window store retire in one cycle;
+the completion signal (the `done` register in the host control block since
+[specs/software/23](../../specs/software/23-done-register.md); `__rq_status` in URAM before it) is
+written by the program *after* its last result store was accepted, but that store may still be
+sitting in a CC FIFO or on the AXI channel.
+There is deliberately no drain/idle bit — the last write lands within microseconds (worst case a few
+hundred single-beat writes at 100 MHz), while the host's path from observing DONE to touching the
+buffer is Python on the ARM: a 5–10× margin on the tightest path, 100× on the client path.
+**If that ever has to go:** a `pending` counter (accepted − B responses) in `HostWindowFunnel` — one
+register, one poll. Across cores nothing needs ordering; each owns a disjoint 16 MB slice.
+
+### 8.11 Completion is a REGISTER, not a memory word — and that is what keeps the CPU-mem slave legal
+
+**The rule:** the host learns a core has finished by reading the host control block's `DONE` word
+(`0x50`, bit per core), never by polling a word in the core's RAM. `start.S` sets the core-local
+`done` register (`0x4010`) as its last store; `riscqReset` is its only clear.
+**Why:** the core's RAM port 1 is shared by instruction fetch and the host image-load master through
+a round-robin fabric arbiter, and its slave is the stripped `TileLinkCpuMemFiber` — no reorder
+buffer, `a.ready := True`, and a simulation `assert` that its d channel is never back-pressured.
+That assert used to be justified by "the host only touches the port while the core is in reset",
+which the run protocol has not honoured since spec 03 (the poll, the result read-back and the
+mid-run host→core input path all overlap live fetch). The premise that actually holds is arithmetic:
+**host transactions in flight ≤ d-channel buffering back to the AXI bridge** — 4 (`slotsCount`) ≤ 14
+(3 × `StreamPipe.FULL` + the dsp→host `FifoCc` `dDepth`), with a `require` in `PulseTableSoc`.
+**What to re-check:** anything that raises `slotsCount`, or issues bursts/DMA into a core's RAM,
+breaks that inequality. The board driver reads word-at-a-time for a related reason.
+**Bonus:** one read covers every core, and parked cores never raise their bit — so `poll_done` takes
+the list of cores that were actually given a program.
+
+---
+
+## 9. The universal-control refactor (cores built from a channel list)
+
+Gotchas from making the SoC build every core from its [`SocSpec`](SocSpec.md) channel list
+(`specs/universal-control/01`) instead of a fixed gate/readout/demod tree.
+
+### 9.1 A channel slot no core has a bank in must get NO region bus
+
+**Symptom:** adding a bank-less channel kind (`dio`, `env_depth = 0`) makes elaboration fail inside the
+`tilelink.fabric` decoder for that slot's host region.
+**Cause:** [`SocSpecMap`](SocSpec.md) gives every channel slot `j` a host region, but a fabric `Node`
+must have at least one slave downstream — a region whose only channels have no envelope RAM has none.
+**Fix:** build the region bus only when some core has a bank in that slot (`PulseTableSoc.envBuses` is a
+`Seq[Option[Node]]`; the core fiber's `envMems` is likewise an `Option` per channel). The slot keeps its
+address-map hole (1-byte stride) so every other slot's base is unchanged.
+
+### 9.2 `setName` on a child drops the parent prefix — use `setCompositeName` / `setPartialName`
+
+**Symptom:** a block named per channel comes out with no parent in its name — every core's bank is a
+bare `gateMemFiber`, an `io`-bundle port a bare `dio_q0_ttl_out` instead of `io_dio_q0_ttl_out` — so
+netlist names stop matching the pblock/XDC patterns that key off the hierarchy.
+**Cause:** `setName` is **absolute** (`mode = ABSOLUTE`): it replaces the whole name, parent prefix
+included.
+**Fix:** name a child relative to its owner — `setCompositeName(this, s"${ch.name}MemFiber")` for the
+per-channel envelope banks and channels (`<parent>_<postfix>`), and `setPartialName(s"dio_${n}_out")` for
+a member of the `io` bundle (`OWNER_PREFIXED`, so the `io_` prefix survives).
+
+### 9.3 An internal `Flow` of a Component cannot be read by the parent — make it an `io` port
+
+**Symptom:** the parent reads a child's internal signal (a report `Flow`, a derived time) and elaboration
+fails, or the signal is silently pruned/unassigned.
+**Cause:** SpinalHDL only lets a parent see a child's **IO**; a plain internal signal of a hard
+`Component` is not visible across the boundary (the same rule that forces `RiscvSoc`'s `iLoad`/`dTap` to
+be slave-IO, §1).
+**Fix:** export it. [`TimedDio`](TimedDio.md) publishes its edge report as `io.event` (a `master Flow`)
+plus `io.eventTime` / `io.time` `out` ports, and the shell wires those into the up-link's `EventSource`.
+
+### 9.4 A `TimedQueue` pops at most every OTHER cycle, and holds `queueDepth` entries
+
+**Symptom:** a DIO train programmed with `dur = 1` misses edges; a long train plays its first few entries
+and drops the rest.
+**Cause:** the queue's pop FSM is `pop = timeUp && !RegNext(pop.valid)` — a 1-cycle blank after every pop
+(II = 2) — and a push into a **full** queue is silently dropped (posted semantics, no back-pressure
+reaches the core).
+**Fix:** the shortest hold of an entry followed by another is **2 batches** (assert it in software), and
+pace a train to at most `queueDepth` entries scheduled ahead (the core's `queue_depth`, 4 by default) —
+the `riscq.cal.base.TRAIN_AHEAD` idiom. Both limits are shared with the pulse channels, and both are exercised by `TimedDioSim`.
+
+## 10. The put network (cross-core puts, `specs/cross-core/02`)
+
+### 10.1 A `Vec(Reg)` element you `val`-bind is a reference, not a copy
+
+**Symptom:** `val w = regs(g); w(slot) := bit; regs(g) := w` elaborates but the word never changes (or
+the "copy" mutates the register directly), and a broadcast of `w` carries the *old* value.
+**Cause:** `regs(g)` is the register (a muxed read when `g` is a `UInt`); assigning into it assigns the
+register. There is no value semantics.
+**Fix:** `val w = cloneOf(regs(g)); w := regs(g); w(slot) := bit; regs(g) := w` — the `PutHub` group
+word update. Same for a `Bits` you mean to derive from a register.
+
+### 10.2 A `StreamArbiter` `roundRobin` serves same-cycle sources in a *rotating* order
+
+**Symptom:** a model that assumes "lowest index first" among sources valid on the same cycle mismatches
+the hub's per-word sequence after the first round.
+**Cause:** the round-robin priority rotates after every grant; the order among simultaneous sources
+depends on history.
+**Fix:** check order-insensitive properties (the final word after each burst, the beat count, per-source
+order), as `PutHubSim` does — never the interleaving.
+
+### 10.3 Do not edit Scala while the co-sim tier runs
+
+**Symptom:** `pytest --cosim` reports `RuntimeError` setup errors on the 3-core (`sim-2q1c`) tests, or
+tests that pass alone, after you touched `src/` during the run.
+**Cause:** each co-sim config generates its RTL with `mill` *at test time*, so a half-edited tree is
+elaborated mid-run.
+**Fix:** finish and compile the Scala change, then start the tier; edit only docs/python meanwhile.
+
+### 10.4 Linking an RV32 sim program needs `lld`
+
+**Symptom:** the `clang -target riscv32 …` line in the `sw/*.S` headers fails with
+`unrecognised emulation mode: elf32lriscv`.
+**Cause:** the default system `ld` is x86-only.
+**Fix:** add `-fuse-ld=lld` (`/config/build/riscv-install/bin/ld.lld` exists); `sw/xcore.S` documents
+the full line.
+
+### 10.5 `hubIn` must be driven by the top — a default drive is an `ASSIGNMENT OVERLAP`
+
+**Symptom:** `ASSIGNMENT OVERLAP` on `riscqCores_i_hubIn_valid` when the SoC top connects the hub.
+**Cause:** a `Flow` declared in the core shell with a default (`valid := False`) and then `<<`-driven by
+the parent is two full drivers, not a default plus an override.
+**Fix:** declare it undriven in the shell and require the top to drive it (`PulseTableSoc` is the only
+instantiator); a top without a hub would tie it off itself.
+
+### 8.9 A LOC'd GT's BUFG_GTs must escape every hard confine pblock
+
+A `GTYE4_CHANNEL` LOC'd to a site (WR link: `X0Y4`, SFP0) can only drive `BUFG_GT`/`BUFG_GT_SYNC`
+cells **in its own clock region** (`rule_gt_bufggt` and friends). If the transceiver wrapper's
+subtree is swept into the hard datapath confine (`X1Y0:X5Y7`), the IO Clock Placer fails with
+"illegal clock rule" — and the workaround Vivado prints (`CLOCK_DEDICATED_ROUTE ANY_CMT_COLUMN`)
+would move the recovered/link clocks onto general routing, which for White Rabbit destroys the
+deterministic-latency premise. Fix at the *membership* level, like the URAM `mem` exclusion: keep
+`NAME !~ ${base}/wrGtyPhy_1/*` out of the pblock filters (`pblocks-bd.tcl`) so the GT-adjacent
+buffers and bring-up FSMs float to the GT's region. The WR *node* (PCS/TSU/register) logic is
+plain fabric on BUFG_GT-driven clocks and confines fine.
+
+### 8.9 One `Mem.write` call = one write port — multiple calls un-infer the RAM into LUT loops
+
+Every `Mem.write(...)` *call site* elaborates a separate write port (five `when`-branch calls in
+`WrRxPcs` emitted five clocked `always` blocks writing `slots_buf`). Verilator simulates that
+happily (`-Wno-MULTIDRIVEN` hides it), but Vivado cannot map a multi-write-port array to any RAM
+primitive: it resolves the drivers into register/LUT logic **with single-LUT feedback loops** —
+fatal `DRC LUTLP-1` ("combinatorial loop") at implementation, invisible until a hardware build.
+When branches are mutually exclusive, fold them into ONE enable-gated port: default
+`en = False` / `data = 0` wires that the branches assign, and a single
+`mem.write(addr, data, enable = en)` outside the `when` tree — bit-exact (last assignment wins,
+same as SpinalHDL's port ordering), and the RAM infers cleanly. Same-cycle read semantics
+unchanged (`readAsync` write-first note still applies).

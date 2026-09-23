@@ -30,7 +30,7 @@ class _BoardExtras:
     def info(self) -> dict:
         return self._proxy.info()
 
-    def mts(self, daclatency: int = 260, adclatency: int = 60) -> int:
+    def mts(self, daclatency: int = 240, adclatency: int = 72) -> int:
         return self._proxy.mts(daclatency, adclatency)
 
     def refclks(self, lmk_freq: float, lmx_freq: float | None = None) -> None:
@@ -62,6 +62,7 @@ class RemoteDriver:
         self._proxy = Pyro5.api.Proxy(uri)
         self.remote = _RemoteExtras(self._proxy)
         self.board = _BoardExtras(self._proxy)
+        self._host_base = None
 
     def read32(self, addr: int) -> int:
         return self._proxy.read32(int(addr))
@@ -74,6 +75,23 @@ class RemoteDriver:
 
     def write_block(self, addr: int, data: bytes) -> None:
         self._proxy.write_block(int(addr), bytes(data))
+
+    def read_host(self, offset: int, nbytes: int) -> bytes:
+        """Read the board's CMA result buffer at buffer-relative `offset`, chunked like the bundle
+        store. In practice this runs server-side inside `remote_rerun`; the client path exists for
+        ad-hoc inspection (specs/software/22 §2.6)."""
+        out = bytearray()
+        while len(out) < nbytes:
+            n = min(CHUNK, nbytes - len(out))
+            out += _to_bytes(self._proxy.read_host(int(offset) + len(out), int(n)))
+        return bytes(out)
+
+    @property
+    def host_base(self) -> int:
+        """Physical base of the server's `pynq.allocate` result buffer."""
+        if self._host_base is None:
+            self._host_base = int(self._proxy.get_host_base())
+        return self._host_base
 
     def close(self) -> None:
         self._proxy._pyroRelease()

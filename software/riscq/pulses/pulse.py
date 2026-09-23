@@ -23,14 +23,14 @@ class Pulse:
     phase: float = 0.0
     name: str | None = None
 
-    def packed_lines(self, m: SocMap, channel: int) -> np.ndarray:
+    def packed_lines(self, m: SocMap, channel: int, core: int = 0) -> np.ndarray:
         """Envelope-RAM lines, (n_lines, samples_per_line) uint32, zero-padded to whole lines.
-        `channel` is the logical RF channel index (0 gate / 1 ro / 2 demod)."""
-        return pack_env(self.env, m.channel(channel).samples_per_line)
+        `channel` is the channel's index in `core`'s channel list."""
+        return pack_env(self.env, m.channel(channel, core).samples_per_line)
 
-    def dur_batches(self, m: SocMap, channel: int) -> int:
+    def dur_batches(self, m: SocMap, channel: int, core: int = 0) -> int:
         """Pulse duration in batches = number of envelope lines (one line per batch)."""
-        return -(-len(self.env) // m.channel(channel).samples_per_line)
+        return -(-len(self.env) // m.channel(channel, core).samples_per_line)
 
     def freq_code(self, m: SocMap, carrier_hz: float | None = None) -> int:
         """PLAIN carrier frequency code (the golden/pulse-table form, not a seated word): the

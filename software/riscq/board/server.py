@@ -74,6 +74,18 @@ class BoardServer:
         data = serpent.tobytes(data) if isinstance(data, dict) else bytes(data)
         self._driver().write_block(int(addr), data)
 
+    @_locked
+    def read_host(self, offset, nbytes):
+        """The host result buffer, buffer-relative (specs/software/22 §2.6). In practice this runs
+        server-side inside `remote_rerun`; the RPC exists for ad-hoc client reads."""
+        return self._driver().read_host(int(offset), int(nbytes))
+
+    @_locked
+    def get_host_base(self):
+        """Physical base of the driver's CMA result buffer — what `riscq.run.setup` programs into
+        `HOSTWIN_BASE_LO/HI`."""
+        return int(self._driver().host_base)
+
     # ── handshake ──
 
     @_locked
@@ -126,7 +138,7 @@ class BoardServer:
     # ── board ops: thin delegates (spec 10 §3.3) ──
 
     @_locked
-    def mts(self, daclatency=260, adclatency=60):
+    def mts(self, daclatency=240, adclatency=72):
         return self._driver().mts(daclatency=int(daclatency), adclatency=int(adclatency))
 
     @_locked
@@ -203,6 +215,13 @@ class BoardServer:
         board = json.loads(board_file.read_text()) if board_file.exists() else None
 
         from riscq.board.pynq_driver import PynqDriver   # lazy: only importable on the board
+        # free the previous driver's CMA result buffer BEFORE allocating the next one: it is
+        # 16 MB per core (224 MB on the 14q build), so waiting for the GC to reclaim it would make
+        # a reload fail the CMA pre-check for no reason (specs/software/22 §3).
+        close = getattr(self._drv, "close", None)
+        if close is not None:
+            close()
+        self._drv = None
         self._drv = PynqDriver(str(xsa), str(params), board=board, download=bool(download))
         self._params = params.read_text()
         self._bundle = str(bundle)

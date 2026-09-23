@@ -2,7 +2,8 @@ package riscq.soc
 
 import spinal.core._
 import spinal.lib._
-import spinal.lib.bus.amba4.axi.{Axi4, Axi4Config, Axi4SpecRenamer, Axi4CrossbarFactory, Axi4IdRemover}
+import spinal.lib.bus.amba4.axi.{Axi4, Axi4Config, Axi4WriteOnly, Axi4SpecRenamer, Axi4CrossbarFactory, Axi4IdRemover}
+import riscq.soc.link.HostWindowFunnel
 import spinal.lib.bus.misc.SizeMapping
 import riscq.misc.{IBUFGDS, BUFG}
 
@@ -36,6 +37,12 @@ case class ZynqPs() extends BlackBox {
     addressWidth = 40, dataWidth = 32, idWidth = 16,
     useRegion = false, awUserWidth = 16, arUserWidth = 16)))
   Axi4SpecRenamer(maxigp2)
+  // S_AXI_HP0_FPD (`saxigp2`) — the host-window write port into the PS DDR4. Declared with the SoC's own
+  // config so it wires straight through; a real PS8 wrapper presents a 6-bit ID here, so reviving this
+  // (unbuilt) flat top for synthesis would need an id-width adapt.
+  val saxihp0_fpd_aclk = in Bool ()
+  val saxigp2 = slave(Axi4WriteOnly(HostWindowFunnel.axiConfig(40)))
+  Axi4SpecRenamer(saxigp2)
 }
 
 /**
@@ -136,6 +143,9 @@ case class Zcu216TopFlat(
       dacNum = dacNum, adcNum = adcNum, vivado = false, linkPipe = linkPipe)
     soc.io.dspClk := dspClk
     soc.io.dspRst := dspReset
+    // host-window results → PS DDR4 over S_AXI_HP0_FPD, clocked by the same host clock as the SoC.
+    ps.saxihp0_fpd_aclk := ps.pl_clk0
+    ps.saxigp2 << soc.io.hostMem
 
     // host AXI fan-out: PS HPM0_LPD → { SoC control @0x8000_0000, RFDC s_axi @0xB000_0000 }.
     // The crossbar requires master.idWidth ≤ every slave.idWidth; the SoC control port is idWidth=2 while

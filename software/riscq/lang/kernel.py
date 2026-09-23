@@ -20,7 +20,7 @@ from pathlib import Path
 
 from riscq import build
 from riscq.lang import backend_c, ir
-from riscq.map import SocMap
+from riscq.map import ChannelInfo, SocMap
 from riscq.pulses import EnvelopeAllocator, Pulse, units
 
 # a ParamTable pulse's design-time fields (gate["x90"].amp), by rq_slot tuple position
@@ -40,14 +40,23 @@ class KernelCompileError(Exception):
 
 
 class ParamTable:
-    """A per-channel pulse table (spec 02 §3.2): binds a logical RF channel index, its carrier,
-    and a named, ORDERED set of Pulses ("gates"). Bound to a kernel ParamTable parameter at
-    compile time via compile_kernel(tables=dict(name=table)); dict insertion order fixes the slot
-    assignment (`"x90"` -> slot 0). A Pulse carries no channel/slot — it belongs to its table."""
+    """A per-channel pulse table (spec 02 §3.2): binds a logical RF channel, its carrier, and a
+    named, ORDERED set of Pulses ("gates"). Bound to a kernel ParamTable parameter at compile time
+    via compile_kernel(tables=dict(name=table)); dict insertion order fixes the slot assignment
+    (`"x90"` -> slot 0). A Pulse carries no channel/slot — it belongs to its table.
 
-    def __init__(self, channel: int, freq_hz: float, pulses: dict[str, Pulse]):
-        if not isinstance(channel, int) or isinstance(channel, bool):
-            raise ValueError(f"ParamTable channel must be an int, got {channel!r}")
+    `channel` is a `SocMap` ChannelInfo (resolved by name: `m.channel_named("gate", core)`) or the
+    bare index it carries. `.channel` is always the int index; `.core` is the core the ChannelInfo
+    came from, or None for a bare index — compile_kernel refuses a table from another core."""
+
+    def __init__(self, channel: int | ChannelInfo, freq_hz: float, pulses: dict[str, Pulse]):
+        if isinstance(channel, ChannelInfo):
+            self.core: int | None = channel.core     # the core this table was resolved on
+            channel = channel.index
+        elif isinstance(channel, int) and not isinstance(channel, bool):
+            self.core = None                          # a bare index belongs to no particular core
+        else:
+            raise ValueError(f"ParamTable channel must be an int or a ChannelInfo, got {channel!r}")
         if not pulses:
             raise ValueError("ParamTable needs at least one pulse")
         for name, p in pulses.items():
@@ -72,17 +81,87 @@ class ParamTable:
         return units.freq_to_code(self.freq_hz, m.params)
 
 
+class DioTable(ParamTable):
+    """A timed-DIO channel's slot table (universal-control/01 P5): `entries` maps a name to
+    `(mask, value, dur_batches)` — the fired entry sets the masked output lines to `value` at its
+    scheduled batch and holds `dur` (>= 2 when another entry follows). Bound and played exactly like a
+    ParamTable (`init_pulse_params(ttl.pulses)`, `play(ttl, ttl["on"], t)`); `ttl.sink` folds to the
+    channel's event-sink base (`pop_event(ttl.sink)` reads an input-edge event)."""
+
+    def __init__(self, channel: int | ChannelInfo, entries: dict[str, tuple[int, int, int]]):
+        if isinstance(channel, ChannelInfo):
+            self.core = channel.core
+            channel = channel.index
+        elif isinstance(channel, int) and not isinstance(channel, bool):
+            self.core = None
+        else:
+            raise ValueError(f"DioTable channel must be an int or a ChannelInfo, got {channel!r}")
+        if not entries:
+            raise ValueError("DioTable needs at least one entry")
+        for name, e in entries.items():
+            if len(e) != 3 or not all(isinstance(x, int) for x in e):
+                raise ValueError(f"entry {name!r} must be (mask, value, dur_batches) ints, got {e!r}")
+            mask, value, dur = e
+            if not (0 <= mask <= 0xFFFF and 0 <= value <= 0xFFFF and 1 <= dur <= 0xFFFF):
+                raise ValueError(f"entry {name!r}: mask/value are 16-bit, dur in [1, 65535]")
+        self.channel = channel
+        self.freq_hz = 0.0
+        self.pulses = dict(entries)
+
+
+class Group:
+    """A cross-core group (specs/cross-core/02 §8.1): one shared 32-bit word every core holds as
+    `board[id]`, and the counted barrier of the same `id`. `members` are core indices in slot order —
+    a member's slot is its position, so `publish(g, bit)` on core `q` sets bit `members.index(q)` and
+    `remote(g, q)` reads it back; `barrier(g)` arrives at barrier `id` with `count = len(members)` and
+    returns the released time. Bind it: `compile_kernel(..., pair=Group([q0, q1], id=0))`."""
+
+    def __init__(self, members, id: int = 0):
+        self.members = [int(q) for q in members]
+        if len(set(self.members)) != len(self.members):
+            raise ValueError(f"Group members must be distinct, got {self.members}")
+        if not 0 <= id < 4:
+            raise ValueError(f"Group id {id} out of range (RQ_GROUPS = 4)")
+        self.id = int(id)
+
+    def slot_of(self, core: int) -> int:
+        return self.members.index(core)
+
+
+class Mailbox:
+    """A one-sender signal mailbox (specs/cross-core/02 §8.1): `sender` may `signal(m, x)`, `receiver`
+    may `wait_signal(m)` (halting, consume-on-read); `index` picks the receiver's mailbox register
+    (`RQ_INBOX_MAILBOX0 + index·0x20`). The address says who sent it, so a kernel that signals from
+    the wrong core is a compile error."""
+
+    def __init__(self, sender: int, receiver: int, index: int = 0, receiver_board: int = 0):
+        if not 0 <= index < 2:
+            raise ValueError(f"Mailbox index {index} out of range (RQ_MAILBOX_NUM = 2)")
+        self.sender, self.receiver, self.index = int(sender), int(receiver), int(index)
+        self.receiver_board = int(receiver_board)     # the receiver's board (multi-board systems)
+
+
 class Array:
     """Parameter annotation AND size binding: `counts: Array` in the signature,
     `compile_kernel(k, counts=Array(31))` to size the on-core int32 buffer. `input=True` marks a
     host-preloaded buffer (a slot/time schedule) — it lands in .data instead of .bss so the host
-    write survives boot (spec 02 §3.1); a plain (output) Array stays in .bss."""
+    write survives boot (spec 02 §3.1); a plain (output) Array stays in .bss.
 
-    def __init__(self, n: int, input: bool = False):
+    `host=True` puts an OUTPUT array in the core's write-only host window instead of RAM
+    (specs/software/22): the kernel body is identical — `out[k] = ...` is a plain volatile store
+    either way — but the store lands in PS DDR4, so the array is not bounded by the 16 KB unified
+    I+D RAM (2 M shots per core per run instead of ~1k). The placement is a call-site choice; no
+    kernel changes."""
+
+    def __init__(self, n: int, input: bool = False, host: bool = False):
         if not isinstance(n, int) or isinstance(n, bool) or n <= 0:
             raise ValueError(f"Array size must be a positive int, got {n!r}")
+        if input and host:
+            raise ValueError("Array(input=True, host=True) is not possible — the host window is "
+                             "write-only, so a host-preloaded input cannot live there")
         self.n = n
         self.input = bool(input)
+        self.host = bool(host)
 
 
 class Kernel:
@@ -117,41 +196,57 @@ class _RTable:
 
 
 def compile_kernel(k: Kernel, soc_map: SocMap, tables: dict[str, ParamTable] | None = None,
-                   include=(), **bindings) -> build.Program:
-    """Compile one specialization of `k`: python -> IR -> C -> flat image.
+                   include=(), core: int = 0, **bindings) -> build.Program:
+    """Compile one specialization of `k` for `core`: python -> IR -> C -> flat image.
+
+    `core` picks the core whose channel geometry (`soc_map.channel(index, core)`) and header
+    (`soc_map.gen_header(core)`) the program is compiled against, and folds as the kernel's own
+    `core` parameter where it has one (`if core == 1: ...`). A bound ParamTable resolved on a
+    DIFFERENT core is an error.
 
     `tables` binds ParamTable parameters (a table reached only from a dead branch needs no
-    binding); `include` lists user header files (#included after riscq.h, hashed into the
-    build-cache key); `bindings` bake int parameters as constants and size Array parameters
-    (`counts=Array(31)`). Returns a Program carrying the params layout, the array table, the
-    per-channel envelope images, and each live table's slot codes for riscq.run to upload."""
-    fe = _FrontEnd(k, soc_map, dict(tables or {}), dict(bindings))
+    binding); every bound table is emitted into the Program whether or not the body references
+    it (specs/universal-cal/01 §6.3: a generated sequence header may be the only user).
+    `include` lists user headers — file paths, or `(name, text)` pairs of generated headers —
+    #included after riscq.h and hashed into the build-cache key; `bindings` bake int parameters
+    as constants and size Array parameters (`counts=Array(31)`). Returns a Program carrying the
+    params layout, the array table, the per-channel envelope images, and each live table's slot
+    codes for riscq.run to upload."""
+    fe = _FrontEnd(k, soc_map, dict(tables or {}), dict(bindings), int(core))
     kir = fe.compile()
     extra_headers = {}
-    for path in include:
-        p = Path(path)
-        kir.includes.append(p.name)
-        extra_headers[p.name] = p.read_text()
+    for inc in include:
+        if isinstance(inc, tuple):
+            name, text = inc
+        else:
+            name, text = Path(inc).name, Path(inc).read_text()
+        kir.includes.append(name)
+        extra_headers[name] = text
     c_source = backend_c.emit(kir)
-    image = build.compile_c(c_source, soc_map, extra_headers=extra_headers or None)
+    image = build.compile_c(c_source, soc_map, extra_headers=extra_headers or None, core=fe.core)
     params: dict[str, int | None] = {name: None for name in kir.params}
     envelopes = {ch: alloc.image() for ch, alloc in fe.allocs.items() if alloc.image()}
     prog_tables = {t.name: list(t.slot_codes) for t in kir.tables}
     return build.Program(image, params=params, arrays=dict(kir.arrays), envelopes=envelopes,
-                         tables=prog_tables, c_source=c_source, bindings=dict(fe.bound))
+                         tables=prog_tables, c_source=c_source, bindings=dict(fe.bound),
+                         host_arrays=dict(kir.host_arrays), core=fe.core)
 
 
 def _wrap32(v: int) -> int:
     return (v + (1 << 31)) % (1 << 32) - (1 << 31)
 
 
+_XCORE_OPS = ("publish", "remote", "barrier", "signal", "wait_signal")
+
+
 class _FrontEnd:
-    def __init__(self, k: Kernel, soc_map: SocMap, tables: dict, bindings: dict):
+    def __init__(self, k: Kernel, soc_map: SocMap, tables: dict, bindings: dict, core: int):
         if not isinstance(k, Kernel):
             raise KernelCompileError(
                 f"compile_kernel needs an @kernel function, got {type(k).__name__}")
         self.fn = k.fn
         self.m = soc_map
+        self.core = core              # the core this specialization is compiled for
         self.tables = tables          # name -> ParamTable, from tables=
         self.bindings = bindings
 
@@ -165,7 +260,9 @@ class _FrontEnd:
         self.bound: dict[str, int] = {}
         self.uparams: list[str] = []
         self.arrays: dict[str, int] = {}
+        self.xcore = {}   # Group / Mailbox bindings by parameter name
         self.input_arrays: set[str] = set()
+        self.host_arrays: set[str] = set()
         self.table_params: list[str] = []
         self.param_names: set[str] = set()
 
@@ -179,13 +276,30 @@ class _FrontEnd:
     def compile(self) -> ir.KernelIR:
         self._classify_params()
         body = self._block(self.fdef.body, drop_docstring=True)
+        for tname in self.tables:            # bound but unreferenced tables are emitted too
+            self._resolve_table(self.fdef, tname)
         tables = [ir.Table(rt.name, rt.cname, rt.count, rt.carrier_code, list(rt.slot_codes))
                   for rt in self._resolved.values()]
         return ir.KernelIR(
             name=self.fdef.name, src_file=self.file, def_line=self.fdef.lineno,
             params=list(self.uparams), arrays=dict(self.arrays),
-            input_arrays=set(self.input_arrays), locals=dict(self.locals),
+            input_arrays=set(self.input_arrays), host_arrays=self._host_offsets(),
+            locals=dict(self.locals),
             tables=tables, body=body)
+
+    def _host_offsets(self) -> dict:
+        """Host-window arrays packed from offset 0 in declaration order: name -> (byte offset, n).
+        Every core has its own 16 MB slice, so the offsets are the same on every core and the
+        funnel adds `core << 24`."""
+        out, off = {}, 0
+        for name, n in self.arrays.items():
+            if name in self.host_arrays:
+                out[name] = (off, n)
+                off += 4 * n
+        if off > self.m.HOSTWIN_BYTES:
+            self._err(self.fdef, f"host-window arrays need {off} B, window is "
+                                 f"{self.m.HOSTWIN_BYTES} B per core")
+        return out
 
     def _err(self, node, msg):
         line = getattr(node, "lineno", None) or self.fdef.lineno
@@ -207,6 +321,8 @@ class _FrontEnd:
                 self._err(arg, f"parameter name {name!r} uses the reserved '__rq_' prefix")
             ann = anns.get(name)
             if ann is int:
+                if name == "core":                    # the compile target, folded (spec 01 §2.5)
+                    self.bindings.setdefault(name, self.core)
                 if name in self.bindings:
                     v = self.bindings.pop(name)
                     if isinstance(v, bool):
@@ -224,6 +340,15 @@ class _FrontEnd:
                     self._err(arg, f"ParamTable parameter {name!r} is bound via "
                                    f"tables=dict({name}=<ParamTable>), not a binding")
                 self.table_params.append(name)
+            elif ann is Group or ann is Mailbox:
+                if name not in self.bindings:
+                    self._err(arg, f"{ann.__name__} parameter {name!r} needs a binding: "
+                                   f"compile_kernel(..., {name}={ann.__name__}(...))")
+                v = self.bindings.pop(name)
+                if not isinstance(v, ann):
+                    self._err(arg, f"binding for {name!r} must be a {ann.__name__}, "
+                                   f"got {type(v).__name__}")
+                self.xcore[name] = v
             elif ann is Array:
                 if name not in self.bindings:
                     self._err(arg, f"Array parameter {name!r} needs a size binding: "
@@ -235,15 +360,20 @@ class _FrontEnd:
                 self.arrays[name] = v.n
                 if v.input:
                     self.input_arrays.add(name)
+                if v.host:
+                    self.host_arrays.add(name)
             else:
-                self._err(arg, f"parameter {name!r} must be annotated int, ParamTable, or Array")
+                self._err(arg, f"parameter {name!r} must be annotated int, ParamTable, Array, "
+                               f"Group, or Mailbox")
         self.param_names = set(self.bound) | set(self.uparams) | set(self.arrays) \
-            | set(self.table_params)
+            | set(self.table_params) | set(self.xcore)
         if self.bindings:
             self._err(self.fdef, f"bindings for unknown parameters: {sorted(self.bindings)}")
         bad_tables = set(self.tables) - set(self.table_params)
-        if bad_tables:
+        if bad_tables and self.table_params:
             self._err(self.fdef, f"tables for non-ParamTable parameters: {sorted(bad_tables)}")
+        # a kernel with NO ParamTable parameters takes tables by name for its generated
+        # sequence header (specs/universal-cal/01 §6.3): every one is emitted (compile()).
         for tname, table in self.tables.items():
             if not isinstance(table, ParamTable):
                 self._err(self.fdef, f"tables[{tname!r}] must be a ParamTable, "
@@ -261,8 +391,11 @@ class _FrontEnd:
             self._err(node, f"ParamTable {tname!r} has no binding on this specialization — "
                             f"pass tables=dict({tname}=<ParamTable>)")
         table = self.tables[tname]
+        if table.core is not None and table.core != self.core:
+            raise ValueError(f"ParamTable {tname!r} was resolved on core {table.core}, but this "
+                             f"kernel is compiled for core {self.core}")
         try:
-            chinfo = self.m.channel(table.channel)   # host-side ValueError on unknown index (§5)
+            chinfo = self.m.channel(table.channel, self.core)  # ValueError on unknown index (§5)
         except ValueError as e:
             raise ValueError(f"ParamTable {tname!r}: {e}") from None
         prev = self._channel_used.get(table.channel)
@@ -274,11 +407,21 @@ class _FrontEnd:
                             f"{table.channel} ({chinfo.cname}) has only {chinfo.slot_count} "
                             f"slot(s)")
         self._channel_used[table.channel] = tname
-        alloc = self.allocs.setdefault(chinfo.index,
-                                       EnvelopeAllocator(self.m.params.env_depth))
+        if isinstance(table, DioTable):
+            if chinfo.kind != "dio":
+                self._err(node, f"DioTable {tname!r} bound to channel {table.channel} "
+                                f"({chinfo.name}), which is a {chinfo.kind} channel, not dio")
+            slot_codes = [(mask, value, 0, dur) for mask, value, dur in table.pulses.values()]
+            rt = _RTable(name=tname, table=table, cname=chinfo.cname, base=chinfo.base,
+                         count=len(table.pulses), carrier_code=0, slot_codes=slot_codes)
+            self._resolved[tname] = rt
+            return rt
+        if chinfo.kind == "dio":
+            self._err(node, f"ParamTable {tname!r} bound to dio channel {chinfo.name}: use a DioTable")
+        alloc = self.allocs.setdefault(chinfo.index, EnvelopeAllocator(chinfo.env_depth))
         slot_codes = []
         for pname, pulse in table.pulses.items():
-            lines = pulse.packed_lines(self.m, chinfo.index)
+            lines = pulse.packed_lines(self.m, chinfo.index, self.core)
             line0 = alloc.add(lines, name=f"{tname}[{pname!r}]")
             slot_codes.append((pulse.phase_code(), pulse.amp_code(), line0, len(lines)))
         rt = _RTable(name=tname, table=table, cname=chinfo.cname, base=chinfo.base,
@@ -535,6 +678,9 @@ class _FrontEnd:
         if n in self.arrays:
             self._err(node, f"Array {n!r} can only be indexed, passed to a call, or given "
                             f"to ptr()")
+        if n in self.xcore:
+            self._err(node, f"{type(self.xcore[n]).__name__} {n!r} is only a call argument "
+                            f"(publish/remote/barrier/signal/wait_signal)")
         found, v = self._lookup_closure(n)
         if found:
             if isinstance(v, bool):
@@ -663,6 +809,45 @@ class _FrontEnd:
         self._err(node, "subscripting a plain int — only Arrays and ptr locals can be "
                         "indexed")
 
+    # ── the cross-core ops (specs/cross-core/02 §8.1): every constant folds from the binding ──
+
+    def _xcore_call(self, node, name):
+        args = node.args
+        if not args or not (isinstance(args[0], ast.Name) and args[0].id in self.xcore):
+            self._err(node, f"{name}() takes a Group/Mailbox parameter first")
+        obj = self.xcore[args[0].id]
+        want = {"publish": (Group, 2), "remote": (Group, 2), "barrier": (Group, 1),
+                "signal": (Mailbox, 2), "wait_signal": (Mailbox, 1)}[name]
+        if not isinstance(obj, want[0]) or len(args) != want[1]:
+            self._err(node, f"{name}() takes ({want[0].__name__}{', x' if want[1] == 2 else ''})")
+        if isinstance(obj, Group):
+            if name == "barrier":
+                return ir.Call("barrier", [ir.Const(obj.id), ir.Const(len(obj.members))])
+            if name == "publish":
+                if self.core not in obj.members:
+                    self._err(node, f"core {self.core} is not a member of group {args[0].id!r} "
+                                    f"{obj.members} — it cannot publish to it")
+                bit, _ = self._expr(args[1])
+                return ir.Call("publish", [ir.Const(obj.id), ir.Const(obj.slot_of(self.core)), bit])
+            # remote(g, q): q must fold to a member's core index
+            q, _ = self._expr(args[1])
+            if not isinstance(q, ir.Const) or q.value not in obj.members:
+                self._err(node, f"remote({args[0].id}, q): q must be a constant member of "
+                                f"{obj.members}")
+            return ir.Call("remote", [ir.Const(obj.id), ir.Const(obj.slot_of(q.value))])
+        if name == "signal":
+            if self.core != obj.sender:
+                self._err(node, f"only core {obj.sender} (the sender) may signal {args[0].id!r}; "
+                                f"this is core {self.core}")
+            x, _ = self._expr(args[1])
+            node = self.m.inbox_node(obj.receiver, obj.receiver_board)
+            return ir.Call("signal", [ir.Const(node, f"RQ_INBOX_NODE({obj.receiver_board}, {obj.receiver})"),
+                                      ir.Const(obj.index), x])
+        if self.core != obj.receiver:
+            self._err(node, f"only core {obj.receiver} (the receiver) may wait on {args[0].id!r}; "
+                            f"this is core {self.core}")
+        return ir.Call("wait_signal", [ir.Const(obj.index)])
+
     def _attribute(self, node):
         v = node.value
         # gate.freq -> carrier code ; gate.pulses is a call-only projection
@@ -672,11 +857,18 @@ class _FrontEnd:
                 # carrier_code is already the seated register word (units.freq_to_code, spec 12), so
                 # set_freq(ch, ch.freq) emits it raw — and it loads in one `lui` (low 16 bits zero).
                 return ir.Const(self._resolve_table(node, tname).carrier_code), "int"
+            if node.attr == "sink":
+                rt = self._resolve_table(node, tname)
+                chname = self.m.channel(rt.table.channel, self.core).name
+                sinks = {name: base for name, _, base in self.m.sinks(self.core)}
+                if chname not in sinks:
+                    self._err(node, f"channel {chname!r} reports no events — it has no sink")
+                return ir.Const(sinks[chname], f"RQ_SINK_{chname.upper()}"), "int"
             if node.attr == "pulses":
                 self._err(node, f"{tname}.pulses is only valid as a call argument "
                                 f"(init_pulse_params({tname}.pulses)), not a bare value")
             self._err(node, f"unknown ParamTable attribute '.{node.attr}' — "
-                            f"one of .freq / .pulses (a gate field is {tname}[\"x90\"].amp)")
+                            f"one of .freq / .pulses / .sink (a gate field is {tname}[\"x90\"].amp)")
         # gate["x90"].amp (.phase/.env/.dur/.freq) -> that pulse's design-time code
         if (isinstance(v, ast.Subscript) and isinstance(v.value, ast.Name)
                 and v.value.id in self.table_params):
@@ -697,6 +889,8 @@ class _FrontEnd:
         if node.keywords:
             self._err(node, "keyword arguments are not supported — C calls are positional")
         name = node.func.id
+        if name in _XCORE_OPS:
+            return self._xcore_call(node, name)
         if name == "ptr":
             self._err(node, "ptr() can only appear as `p = ptr(buf)` or `p = ptr(buf, k)`")
         if name == "range":

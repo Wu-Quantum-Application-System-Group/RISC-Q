@@ -1,6 +1,7 @@
-# RfChannels — `PulseDriveChannel` / `DemodChannel` converter-edge boxes
+# RfChannels — the `Channel` contract and its `PulseDriveChannel` / `DemodChannel` kinds
 
-**Source:** `src/riscq/soc/rf/RfChannels.scala` · **Package:** `riscq.soc.rf` · **Type:** Components
+**Source:** `src/riscq/soc/rf/Channel.scala`, `src/riscq/soc/rf/RfChannels.scala` ·
+**Package:** `riscq.soc.rf` · **Type:** trait (`Channel`) + Components
 
 The two self-contained converter-edge boxes the floorplan pins. Each binds a DSP datapath block to a
 DAC/ADC edge and exposes a single CPU-facing input — the demuxed posted `Flow(RfCmd)` plus the shared
@@ -10,6 +11,26 @@ channels route the pulse to a DAC, the demod channel routes it to the decoder as
 channel's buffer inherits the spec 09 B0 `startTime` **auto-advance** and its one-stage export (see
 [PulseParamBuffer](PulseParamBuffer.md)), so a contiguous pulse train on any channel is one `play` + N−1
 bare `fire`s while absolute timing stays bit-identical.
+
+## `Channel` — what the shell instantiates a kind through
+
+Every converter-edge channel kind implements this one trait, and the core shell
+([RiscqRfWithPulseTableFiber](RiscqRfWithPulseTableFiber.md)) builds a core's channel list through it,
+naming a kind nowhere but its one `mkChannel` dispatch:
+
+| Member | What |
+|---|---|
+| `cmd: Flow[RfCmd]` | the channel's demuxed posted sub-window (its only CPU-facing input) |
+| `timeBcast: UInt` | the shared batch-time broadcast |
+| `memPort: Option[MemReadPort[Bits]]` | the envelope-RAM read port — `None` for a kind with no bank |
+| `envLanes: Int` | lanes a stored envelope line expands to (0 = no bank) |
+| `dacOut: Option[Flow[Vec[Complex]]]` | the DAC-bound output, for drive kinds |
+| `carrier: Option[Flow[Vec[Complex]]]` | the decoder-bound carrier, for the demod kind |
+| `event: Option[EventSource]` | the channel's up-link reporter, for kinds that own one — the shell serialises it into inbox puts ([EventLink](EventLink.md)) |
+
+`PulseDriveChannel` and `DemodChannel` below implement it; [TimedDio](TimedDio.md) (`kind: "dio"`) is the
+third kind — no bank, no converter, and a `fifo`-kind reporter. The demod's reporter is the one built by
+the shell rather than by the channel, since its source is the decoder the carrier feeds.
 
 ## `PulseDriveChannel` — a gate/readout drive bound to a DAC
 
@@ -81,9 +102,9 @@ chosen from `pulseNum`) and the DSP options
 (`prescaleAmp`, `saturate`, `phasorMethod`); `PulseDriveChannel` additionally has `realOutput` and the
 `useAligned` scheduler A/B, which `DemodChannel` fixes (`realOutput = false`, no `dcOffset`). Both use the
 `PulseParamBuffer` RF layout (`fire`@0, `freq`@4, `phaseOffset`@0xC, `table[i]`@`(i+1)*0x10`,
-`startTime`@0x4100). The qubit core wires all three channels in `RiscqRfWithPulseTableFiber`'s `posted`
-area (`mkDriveChannel` for the two drives, `DemodChannel` for the carrier), each off its own demuxed
-RF sub-window, and connects the envelope RAMs.
+`startTime`@0x4100). `RiscqRfWithPulseTableFiber`'s `posted` area builds one channel per
+`ChannelSpec` (its `mkChannel` dispatch on `kind`), each off its own demuxed RF sub-window, and connects
+the envelope RAMs.
 
 ## Verification
 

@@ -28,6 +28,23 @@ def _clip16(x) -> np.ndarray:
     return np.clip(np.rint(x), _I16_MIN, _I16_MAX).astype(np.int64)
 
 
+def _amp_est(samples: np.ndarray) -> float:
+    """This batch's drive amplitude: the phase-blind RMS estimate sqrt(2·mean(x²)) every driven model
+    uses (TwoLevelModel's — a square-envelope tone of amplitude A reads back A), so one convention
+    sets the rotation angle on every drive line."""
+    return math.sqrt(2.0 * float(np.mean(samples * samples)))
+
+
+def _demod(t: int, samples: np.ndarray, code: int) -> complex:
+    """This batch's DAC samples demodulated against `code` (ThreeLevelModel._demod, as a function):
+    the magnitude says whether that carrier is on, the argument is the rotation axis, and the axis'
+    ramp across batches IS the detuning. Phase reduced mod 2^16 as integers (the hardware's 16-bit
+    phase wrap), so it stays exact at large batch times."""
+    k = np.arange(BATCH_SIZE)
+    ph = (code * (BATCH_SIZE * t + k)) % (1 << 16)
+    return complex(np.sum(samples * np.exp(-1j * math.pi * ph / (1 << 15))))
+
+
 class QuantumModel(Protocol):
     def dac_ids(self) -> list[int]:
         """Which physical DACs this model reads (the bench samples only these each batch)."""
@@ -935,6 +952,229 @@ class TwoQubitModel:
             self._ro_on = {d: False for d in self._ro_set}
 
 
+class CavityModel:
+    """A transmon coupled to two bosonic modes — the multimode co-sim model (spec 24 §4.7).
+
+    ONE model holds the JOINT state psi[q, m, s]: q = the transmon level (g, e, f), m = the
+    manipulate mode M's photon number (0..2), s = the storage mode S's (0..1) — the sideband swaps
+    entangle the three, so they cannot be separate models. It reads three channels OF ONE CORE (the
+    multi-channel build, configs/sim-mm.json: `gate` / `f0g1` / `flux`, each on its own DAC, so no
+    per-line argmax is needed) and reads out exactly like `ThreeLevelModel`: per-transmon-level
+    readout phasors on the core's readout DAC/ADC, the same readout_code / readout_amp / noise /
+    t1 / collapse knobs.
+
+    Every coupling is the SAME demodulate-then-rotate mechanism the other models use — rotate a
+    2-level subspace by `rate · amp_est` about the axis this batch's demod of that DAC against the
+    transition's reference frequency recovers. A resonant carrier gives a fixed axis (a flat-top of
+    the planted π length is a full swap, half of it a √SWAP); a detuned one ramps the axis, which is
+    the off-resonant Rabi law Ω²/(Ω²+Δ²)·sin²(√(Ω²+Δ²)·N/2) with no explicit rotating-frame term —
+    so a frequency sweep is Lorentzian-shaped and a frequency × length sweep is a chevron. The three
+    lines:
+
+      - `gate` drives the transmon as ThreeLevelModel does (demod against f_ge AND f_ef, rotate
+        whichever transition the carrier matches, by rabi_*·amp_est). What is new is that the M
+        photon number PULLS the transmon: block n of the state has its own resonance
+        f_ge + n·chi_ge (f_ef + n·chi_ef), so the gate DAC is demodulated against ONE REFERENCE CODE
+        PER PHOTON NUMBER and each block rotates about its own axis. With a photon in M a π at the
+        bare f_ge is no longer a π, and a Ramsey fringe shifts by chi_ge — the dispersive shift the
+        χ calibration measures (chi in Hz, planted, either sign).
+      - `f0g1` couples |f, n⟩ ↔ |g, n+1⟩ at f_f0g1 + n·chi_f0g1, rate `f0g1_rad_per_amp` — the
+        sideband swap that loads a photon into M (qubit to |g⟩, photon in).
+      - `flux` couples |1⟩_M|0⟩_S ↔ |0⟩_M|1⟩_S at f_ms, rate `ms_rad_per_amp` — the beam splitter
+        that moves the photon into storage.
+
+    Rates are rad per unit drive amplitude per batch, `amp_est` the phase-blind RMS of the batch
+    (`_amp_est`), so all three lines share TwoLevelModel's amplitude convention.
+
+    Planted truth the multimode calibrations recover: `f_f0g1`, `f0g1_rad_per_amp`, `f_ms`,
+    `ms_rad_per_amp`, `chi_ge`, `chi_ef`. Pure-state numpy evolution; `t1` amplitude-damps the
+    TRANSMON toward |g⟩ on idle batches (ThreeLevelModel's grid reset, per (m, s) block, so the
+    photon survives the reset). DELIBERATELY OMITTED: cavity decay (M and S never lose a photon) and
+    transmon dephasing; the √(n+1) bosonic enhancement of the sideband rate (every n couples at the
+    same rate); and the |2⟩_M|0⟩_S ↔ |1⟩_M|1⟩_S leg of the beam splitter (only the one-photon pair
+    the calibrations use)."""
+
+    _DRIVE_FLOOR = 100.0                                   # amp_est below this = idle batch
+    _DEFAULT_PHASES = ThreeLevelModel._DEFAULT_PHASES      # 3 tones 120° apart → 3 IQ clusters
+
+    def __init__(self, m, core: int = 0, f_ge: float = 0.0, f_ef: float = 0.0,
+                 rabi_ge_rad_per_amp: float = 0.0, rabi_ef_rad_per_amp: float = 0.0,
+                 f_f0g1: float = 0.0, f0g1_rad_per_amp: float = 0.0,
+                 f_ms: float = 0.0, ms_rad_per_amp: float = 0.0,
+                 chi_ge: float = 0.0, chi_ef: float = 0.0, chi_f0g1: float = 0.0,
+                 readout_code: int = 2048, readout_amp: float = 20000.0,
+                 readout_phase: float = 0.0, level_phases=None, init_level: int = 0,
+                 collapse: bool = False, t1: float | None = None,
+                 noise_scale: float = 0.0, noise_seed: int = 0):
+        self.params = m.params
+        self.gate_dac = m.gate_dac(core)
+        self.f0g1_dac = m.channel_named("f0g1", core).dac
+        self.flux_dac = m.channel_named("flux", core).dac
+        self.ro_dac = m.ro_dac(core)
+        self.adc = m.adc_of(core)
+
+        def code(f_hz):                                    # plain reference codes (16-bit phase math)
+            return units._freq_code(float(f_hz), m.params)
+
+        self.rabi = {(0, 1): float(rabi_ge_rad_per_amp), (1, 2): float(rabi_ef_rad_per_amp)}
+        # one transmon reference code per M photon number — the n·chi pull
+        self._code = {(0, 1): [code(f_ge + n * float(chi_ge)) for n in range(3)],
+                      (1, 2): [code(f_ef + n * float(chi_ef)) for n in range(3)]}
+        # the sideband's own n-dependent resonance: |f, n> <-> |g, n+1> for n = 0, 1
+        self._f0g1_code = [code(f_f0g1 + n * float(chi_f0g1)) for n in (0, 1)]
+        self._ms_code = code(f_ms)
+        self.f0g1_rate = float(f0g1_rad_per_amp)
+        self.ms_rate = float(ms_rad_per_amp)
+
+        self.readout_code = int(readout_code)
+        self.readout_amp = float(readout_amp)
+        self.readout_phase = float(readout_phase)
+        self.level_phases = tuple(self._DEFAULT_PHASES if level_phases is None else level_phases)
+        self._psi = np.zeros((3, 3, 2), dtype=complex)     # [transmon, M photons, S photons]
+        self._psi[int(init_level), 0, 0] = 1.0
+        self.t1 = t1
+        self._t1_decay = math.exp(-1.0 / t1) if t1 else 1.0
+        self.collapse = bool(collapse)
+        self._noise_scale = float(noise_scale)
+        self._rng = np.random.default_rng(noise_seed)
+        self._crng = np.random.default_rng(noise_seed + 0xC0BE)
+        self._ro_active = False
+        self._shot_level = None                            # latched sampled level; None ⇒ silent
+
+    def dac_ids(self) -> list[int]:
+        ids = [self.gate_dac, self.f0g1_dac, self.flux_dac]
+        if self.collapse:
+            ids.append(self.ro_dac)                        # the projective window trigger
+        return list(dict.fromkeys(ids))
+
+    # ── the joint state, as the exact-population tests read it ──
+
+    def populations(self) -> np.ndarray:
+        return np.abs(self._psi) ** 2                      # [q, m, s] joint
+
+    def p_qubit(self) -> np.ndarray:
+        return self.populations().sum(axis=(1, 2))         # (Pg, Pe, Pf)
+
+    def p_m(self) -> np.ndarray:
+        return self.populations().sum(axis=(0, 2))         # M photon number (0, 1, 2)
+
+    def p_s(self) -> np.ndarray:
+        return self.populations().sum(axis=(0, 1))         # S photon number (0, 1)
+
+    def ground_truth(self) -> dict:
+        """The joint state, JSON-serialisable: the three marginals the multimode calibrations read
+        (`p_qubit`, `p_M`, `p_S`), the full 3x3x2 joint population grid, and the state VECTOR as
+        [re, im] pairs in C order of (q, m, s) — the phases a swap leaves behind are visible only
+        there (only `p_qubit` is visible to the hardware readout at all)."""
+        return {"p_qubit": self.p_qubit().tolist(), "p_M": self.p_m().tolist(),
+                "p_S": self.p_s().tolist(), "populations": self.populations().tolist(),
+                "psi": [[float(z.real), float(z.imag)] for z in self._psi.ravel()]}
+
+    # ── evolution ──
+
+    def adc_batch(self, t, dac):
+        driven = self._drive_gate(t, dac[self.gate_dac].astype(float))
+        driven |= self._drive_f0g1(t, dac[self.f0g1_dac].astype(float))
+        driven |= self._drive_ms(t, dac[self.flux_dac].astype(float))
+        if not driven and self.t1:
+            self._relax()                                  # idle batch: the transmon's grid reset
+
+        phasor = self._projective_phasor(dac) if self.collapse else \
+            sum(self.p_qubit()[L] * cmath.exp(1j * self.level_phases[L]) for L in range(3))
+        k = np.arange(ADC_BATCH)
+        ang = math.pi * self.readout_code * (ADC_BATCH * t + k) / (1 << 15) + self.readout_phase
+        lanes = self.readout_amp * (phasor.real * np.cos(ang) - phasor.imag * np.sin(ang))
+        if self._noise_scale:
+            lanes = lanes + self._rng.normal(0.0, self._noise_scale, ADC_BATCH)
+        return {self.adc: _clip16(lanes)}
+
+    def _rotate(self, ia, ib, theta: float, phi: float) -> None:
+        """Rotate the 2-level subspace {psi[ia], psi[ib]} by Bloch angle `theta` about the xy-axis
+        `phi` (U = exp(-i θ/2 (cosφ σx + sinφ σy)) embedded in the joint space) — θ = π is a full
+        swap. The index tuples may be partial or carry slices, so ONE helper serves all three
+        couplings: the transmon's GE/EF inside one photon block (across S), the f0g1 sideband
+        |f, n⟩ ↔ |g, n+1⟩ (across S), and the M↔S beam splitter (across the transmon levels)."""
+        c, s = math.cos(theta / 2), math.sin(theta / 2)
+        em, ep = cmath.exp(-1j * phi), cmath.exp(1j * phi)
+        pa, pb = self._psi[ia].copy(), self._psi[ib].copy()
+        self._psi[ia] = c * pa - 1j * em * s * pb
+        self._psi[ib] = -1j * ep * s * pa + c * pb
+
+    def _drive_gate(self, t: int, samples: np.ndarray) -> bool:
+        """The transmon drive: demod the gate DAC against every (transition, photon number)
+        reference, let the strongest decide which transition the carrier is (ThreeLevelModel's
+        argmax, widened over the chi-pulled codes), then rotate EACH photon block about its own
+        recovered axis — so the blocks whose resonance the carrier misses are off-resonant and
+        barely move. Returns whether the line was driven."""
+        amp_est = _amp_est(samples)
+        if amp_est <= self._DRIVE_FLOOR:
+            return False
+        b = {pair: [_demod(t, samples, c) for c in codes] for pair, codes in self._code.items()}
+        pair = max(b, key=lambda p: max(abs(z) for z in b[p]))
+        if self.rabi[pair]:
+            for n in range(3):
+                z = b[pair][n]
+                self._rotate((pair[0], n), (pair[1], n), self.rabi[pair] * amp_est,
+                             math.atan2(z.imag, z.real))
+        return True
+
+    def _drive_f0g1(self, t: int, samples: np.ndarray) -> bool:
+        """The f0g1 sideband: a coherent |f, n⟩ ↔ |g, n+1⟩ swap at f_f0g1 + n·chi_f0g1, so a
+        resonant flat-top of the π length moves the transmon's |f⟩ into one M photon."""
+        amp_est = _amp_est(samples)
+        if amp_est <= self._DRIVE_FLOOR:
+            return False
+        if self.f0g1_rate:
+            for n in (0, 1):
+                z = _demod(t, samples, self._f0g1_code[n])
+                self._rotate((2, n), (0, n + 1), self.f0g1_rate * amp_est,
+                             math.atan2(z.imag, z.real))
+        return True
+
+    def _drive_ms(self, t: int, samples: np.ndarray) -> bool:
+        """The flux line's M↔S beam splitter: |1⟩_M|0⟩_S ↔ |0⟩_M|1⟩_S at f_ms, across every
+        transmon level (the photon moves, the transmon does not)."""
+        amp_est = _amp_est(samples)
+        if amp_est <= self._DRIVE_FLOOR:
+            return False
+        if self.ms_rate:
+            z = _demod(t, samples, self._ms_code)
+            self._rotate((slice(None), 1, 0), (slice(None), 0, 1), self.ms_rate * amp_est,
+                         math.atan2(z.imag, z.real))
+        return True
+
+    def _relax(self) -> None:
+        """Amplitude-damp the TRANSMON toward |g⟩ one idle batch (ThreeLevelModel._relax, lifted):
+        shrink the |e⟩/|f⟩ amplitudes and pour the norm they lost back into |g⟩ OF THE SAME (m, s)
+        block — the transmon decays, the photons stay put. Over the batched grid's idle head (≫ t1)
+        the transmon resets to |g⟩ while a loaded cavity keeps its photon (no cavity decay)."""
+        keep = self._psi[1:] * self._t1_decay
+        lost = np.sum(np.abs(self._psi[1:]) ** 2 - np.abs(keep) ** 2, axis=0)   # per (m, s)
+        self._psi[1:] = keep
+        a0 = self._psi[0]
+        mag0 = np.abs(a0)
+        unit = np.divide(a0, mag0, out=np.ones_like(a0), where=mag0 > 1e-12)   # |g>'s phase per block
+        self._psi[0] = np.sqrt(np.maximum(0.0, mag0 ** 2 + lost)) * unit
+
+    def _projective_phasor(self, dac) -> complex:
+        """On the readout drive's rising edge sample a definite TRANSMON level from `p_qubit`,
+        PROJECT the joint state onto it (the cavity state stays, conditioned on the outcome — the
+        `TwoQubitModel._collapse_one` mechanics) and latch that level's tone for the window."""
+        ro = dac[self.ro_dac].astype(float)
+        ro_on = _amp_est(ro) > self._DRIVE_FLOOR
+        if ro_on and not self._ro_active:
+            p = self.p_qubit()
+            lvl = int(self._crng.choice(3, p=p / p.sum()))
+            keep = self._psi[lvl].copy()
+            self._psi[:] = 0.0
+            self._psi[lvl] = keep / math.sqrt(float(np.vdot(keep, keep).real))
+            self._shot_level = lvl
+        elif not ro_on:
+            self._shot_level = None
+        self._ro_active = ro_on
+        return 0j if self._shot_level is None else cmath.exp(1j * self.level_phases[self._shot_level])
+
+
 class MultiModel:
     """Several independent QuantumModels driven together (spec 13 §8): each sub-model reads its OWN
     core's gate DAC and drives its OWN core's readout tone. On this build several cores SHARE a readout
@@ -1003,6 +1243,20 @@ def build_model(spec: dict, m) -> QuantumModel:
             m, core=spec.get("core", 0), f_ge=spec.get("f_ge", 0.0), f_ef=spec.get("f_ef", 0.0),
             rabi_ge_rad_per_amp=spec.get("rabi_ge_rad_per_amp", 0.0),
             rabi_ef_rad_per_amp=spec.get("rabi_ef_rad_per_amp", 0.0),
+            readout_code=spec.get("readout_code", 2048), readout_amp=spec.get("readout_amp", 20000.0),
+            readout_phase=spec.get("readout_phase", 0.0), level_phases=spec.get("level_phases"),
+            init_level=spec.get("init_level", 0), collapse=spec.get("collapse", False),
+            t1=spec.get("t1"), noise_scale=spec.get("noise_scale", 0.0),
+            noise_seed=spec.get("noise_seed", 0))
+    if kind == "cavity":
+        return CavityModel(
+            m, core=spec.get("core", 0), f_ge=spec.get("f_ge", 0.0), f_ef=spec.get("f_ef", 0.0),
+            rabi_ge_rad_per_amp=spec.get("rabi_ge_rad_per_amp", 0.0),
+            rabi_ef_rad_per_amp=spec.get("rabi_ef_rad_per_amp", 0.0),
+            f_f0g1=spec.get("f_f0g1", 0.0), f0g1_rad_per_amp=spec.get("f0g1_rad_per_amp", 0.0),
+            f_ms=spec.get("f_ms", 0.0), ms_rad_per_amp=spec.get("ms_rad_per_amp", 0.0),
+            chi_ge=spec.get("chi_ge", 0.0), chi_ef=spec.get("chi_ef", 0.0),
+            chi_f0g1=spec.get("chi_f0g1", 0.0),
             readout_code=spec.get("readout_code", 2048), readout_amp=spec.get("readout_amp", 20000.0),
             readout_phase=spec.get("readout_phase", 0.0), level_phases=spec.get("level_phases"),
             init_level=spec.get("init_level", 0), collapse=spec.get("collapse", False),

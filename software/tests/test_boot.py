@@ -68,7 +68,9 @@ def test_midrun_rewrite_steers_program(cosim):
     assert drv.read32(status_addr) == STATUS_RUNNING
 
     rq.write_var(drv, m, 0, prog, "knob", 42)    # the mid-run host->core input path
-    status = rq.poll_done(drv, m, 0, prog, timeout=1_000_000)
+    done = rq.poll_done(drv, m, [0], timeout=1_000_000)
+    assert done & 1, f"core 0 DONE bit not set in {done:#010x}"
+    status = rq.read_var(drv, m, 0, prog, "__rq_status")
     assert status & STATUS_DONE_MASK == STATUS_DONE
     assert rq.read_var(drv, m, 0, prog, "out") == 42
     rq.reset(drv, m, on=True)

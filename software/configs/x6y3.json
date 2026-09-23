@@ -12,6 +12,7 @@
     "readout_interp": 16,
     "demod_interp": 4,
     "link_pipe": 2,
+    "hostwin_bits": 23,
     "queue_depth": 32,
     "with_mul": true,
     "dsp_freq_hz": 500000000.0

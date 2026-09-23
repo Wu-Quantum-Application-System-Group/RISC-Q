@@ -17,6 +17,12 @@ Everything else — the fits, the proposals, the (count, kept) decode, the reado
 (`test_amplitude_recovers_rabi`, `test_x6y3_improves_detuned_config`) put the whole loop back
 together with real shots and real noise, and are what notice if an L0 responder or an L2 analytic
 target ever drifts from the hardware.
+
+Retired with the per-class kernels at universal-cal V6: the frame-bracket word tests (`base.x90_vz`
+/ `ef_vz` — the bracket is the sequence compiler's now, pinned in tests/test_sequence.py) and the
+three per-kernel herald-geometry tests, which become the ONE `test_herald_grid_geometry` below
+because there is now one kernel. The bit-exact equality of every emitted window against those
+kernels is recorded at commit 347f749 (tests/test_parity.py, tests/test_parity_2q.py of that tree).
 """
 
 import math
@@ -25,17 +31,15 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from riscq.cal import (Amplitude, Classifier, Config, Frequency, ReadoutCalibration,
-                       calibration_x6y3)
-from riscq.cal import fits, kernels
-from riscq.cal.base import batch_timeout
-from riscq.cal.readout import _ro_amp_prog
 from riscq import run as rq
-from riscq.cal.base import (GATE_CH, GATE_ENV, SEP, X90, batches, demod_table, ef_vz, gate_pulse,
-                            gate_sigma, grid_period, herald_offset, prep, readout_tables,
-                            relax_batches, socmap, train_step, x90_vz)
+from riscq.cal import Amplitude, Classifier, Config, Frequency, ReadoutCalibration, calibration_x6y3
+from riscq.cal import fits
+from riscq.cal.analysis.estimators import rabi_amplitude
+from riscq.cal.base import (GATE_CH, GATE_ENV, SEP, batch_timeout, batches, demod_table, gate_pulse,
+                            gate_sigma, herald_offset, readout_tables, socmap)
+from riscq.cal.gates import resolve
 from riscq.lang import Array, ParamTable, compile_kernel, kernel
-from riscq.map import LEAD, READOUT_LEAD, SocMap, SocParams, pack16
+from riscq.map import LEAD, READOUT_LEAD, SocMap, SocParams
 from riscq.pulses import Pulse, envelopes, units
 from tests.probe import Probe, rabi_for
 
@@ -78,32 +82,6 @@ def test_amplitude_enforces_qcals_n_gates_guard():
     Amplitude(cfg, 0, gate="X", n_gates=2)
 
 
-def test_x90_frame_bracket_words():
-    """spec 13 Q4 — the bracket every X90 play now carries: `set_phase_offset(frame + vz0); play;
-    frame += vz0 + vz1`. The kernels bind the pair as two SEATED phase words (vz0 and the frame step
-    vz0 + vz1); the pair is carried as TWO values because X6Y3's q6 pair is asymmetric. A config with
-    no pair — every co-sim one — binds 0/0, so the bracket writes the phase offset init_pulse_params
-    already left at 0: a no-op."""
-    cfg = Config()
-    assert x90_vz(cfg, 0) == {"vz0": 0, "vzsum": 0}
-    cfg["qubit/0/x90/vz"] = [0.0429, 0.0080]                       # X6Y3 q6 (asymmetric)
-    c0, c1 = units._phase_code(0.0429), units._phase_code(0.0080)
-    assert x90_vz(cfg, 0) == {"vz0": pack16(c0), "vzsum": pack16(c0 + c1)}
-
-
-def test_ef_frame_bracket_words():
-    """spec 14 finding 6 — the EF twin of the bracket above, bound under NON-COLLIDING names so an EF
-    kernel carries both (the GE prep's vz0/vzsum and the EF gate's evz0/evzsum). The pair lives at
-    `qubit/{q}/EF/{name}/vz` and EFPhase calibrates it; the EF X is a bare FAST_DRAG with no pair, so
-    `name='x'` folds to a no-op — as does every co-sim config."""
-    cfg = Config()
-    assert ef_vz(cfg, 0) == {"evz0": 0, "evzsum": 0}
-    cfg["qubit/0/EF/x90/vz"] = [-0.16289759, -0.16289759]           # X6Y3 q2 (the config of record)
-    c = units._phase_code(-0.16289759)
-    assert ef_vz(cfg, 0) == {"evz0": pack16(c), "evzsum": pack16(2 * c)}
-    assert ef_vz(cfg, 0, "x") == {"evz0": 0, "evzsum": 0}           # the EF X carries no pair
-
-
 def test_amplitude_n1_rejects_a_fit_outside_the_swept_span():
     """qcal's in_range guard for the n_gates=1 amplitude fit (single_qubit.py:273-279): the fitted
     π/2 amp code must lie INSIDE the swept codes, exactly as the n_gates>1 vertex already must. The
@@ -119,12 +97,15 @@ def test_amplitude_n1_rejects_a_fit_outside_the_swept_span():
         sig = sigma_per_code * xs
         return xs, sig, (1 - np.cos(rabi * sig)) / 2 + rng.normal(0, 0.01, xs.size)
 
-    amp = Amplitude(Config(), 0)                        # gate X90, n_gates=1 (target π/2)
-    fq, _, a_star, ok = amp._fit_single_gate(*sweep(600, 19000))    # a_true inside the sweep
-    assert fq.ok and ok and abs(a_star - a_true) < 100
-    fq, _, a_star, ok = amp._fit_single_gate(*sweep(8000, 19000))   # a_true OUTSIDE the sweep
-    assert fq.ok and not ok, "a fit whose π/2 amp lies outside the sweep must be rejected"
-    assert 0 < a_star < units.AMP_SCALE, "the old on-scale guard would have accepted it"
+    def estimate(x0, x1):
+        xs, sig, P = sweep(x0, x1)
+        return rabi_amplitude(xs, sig, P, 1, math.pi / 2, "qubit/0/x90/amp")
+
+    est = estimate(600, 19000)                          # a_true inside the sweep
+    assert est.ok and abs(est.proposal["qubit/0/x90/amp"] * units.AMP_SCALE - a_true) < 100
+    est = estimate(8000, 19000)                         # a_true OUTSIDE the sweep
+    assert est.fit.ok and not est.ok, "a fit whose π/2 amp lies outside the sweep must be rejected"
+    assert est.proposal == {}, "a rejected fit writes nothing"
 
 
 def test_frequency_qcal_signature_maps_to_the_shorthand():
@@ -137,7 +118,7 @@ def test_frequency_qcal_signature_maps_to_the_shorthand():
     d = units.code_to_freq(200, m.params)
     ladder = Frequency(cfg, 0, detune=d, n_detune=4)
     explicit = Frequency(cfg, 0, detunings=(-2 * d, -d, d, 2 * d))
-    assert sorted(explicit._d_codes(m.params)) == sorted(ladder._d_codes(m.params))
+    assert sorted(explicit._d_codes(m)) == sorted(ladder._d_codes(m))
     t0, dt = Frequency(cfg, 0, t_max=1e-6, points=30)._wait_grid(m)
     assert t0 == 0 and dt == round(1e-6 / 29 * m.params.dsp_freq_hz) > 0
     assert Frequency(cfg, 0, t0=80e-9, dt=40e-9)._wait_grid(m) == \
@@ -333,6 +314,17 @@ def test_amplitude_fine_pass_improves_the_coarse(cosim, demod_phase):
 L2_MODEL = dict(kind="twolevel", core=0, f_ge=F_GE, noise_scale=0.0, collapse=False)
 
 
+X90, X = 0, 1                            # the probe kernel's own prep fold (was base's)
+
+
+def _gate_table(cfg, q, m, names=("x90", "x")) -> ParamTable:
+    """The Config's own gate pulses as one ParamTable on the qubit's gate channel — what the old
+    `base.prep` handed a kernel; the calibrations get theirs from the sequence compiler."""
+    gs = {n: resolve(cfg, q, n, m) for n in names}
+    first = gs[names[0]]
+    return ParamTable(first.line, first.carrier_hz, {n: g.pulse for n, g in gs.items()})
+
+
 @kernel
 def k_probe_x90(gate: ParamTable, out: Array):
     """One X90 from |0>."""
@@ -493,8 +485,8 @@ def test_prep_gate_x90_and_x_agree(cosim):
     cfg["qubit/0/x/env"] = "square"               # the X: double LENGTH, same amp → the same π
     cfg["qubit/0/x/dur"] = _s(8, m)
     cfg["qubit/0/x/amp"] = 0.495
-    table, pg90, _ = prep(cfg, 0, m, "X90")       # the production prep: table + the kernels' fold
-    _, pgx, _ = prep(cfg, 0, m, "X")
+    table = _gate_table(cfg, 0, m)                # the Config's own x90 + x, on the gate channel
+    pg90, pgx = X90, X
     prog = compile_kernel(k_probe_prep, m, tables=dict(gate=table), out=Array(1))
     spec = {**L2_MODEL, "rabi_rad_per_amp": rabi_for(m, table.pulses["x90"], F_GE, math.pi / 2)}
     p = Probe(cosim, {0: prog})
@@ -635,7 +627,7 @@ def test_readout_timing_knob_moves_the_readout(cosim):
     # would put a systematic error in the slope this test is about.
     ro_freq = units.demod_code_to_freq(8192, m.params)
     ro = ParamTable(1, ro_freq, {"meas": Pulse(envelopes.square(drive), freq_hz=ro_freq, amp=0.5)})
-    prog = compile_kernel(k_ro_delay, m, tables=dict(ro=ro, demod=demod_table(win)), out=Array(2),
+    prog = compile_kernel(k_ro_delay, m, tables=dict(ro=ro, demod=demod_table(win, m)), out=Array(2),
                           code=units.demod_freq_to_code(ro_freq, m.params), pre=pre)
     drv.sim.set_model({"kind": "loopback", "src": m.ro_dac(q), "dst": m.adc_of(q), "gain": 1.0})
     rq.setup(drv, m, {q: prog})
@@ -656,40 +648,6 @@ def test_readout_timing_knob_moves_the_readout(cosim):
         f"16 batches of demod/delay removed {(hi - lo) / per_batch:.2f} batches of the integral, not 16"
     assert 0 <= edge - (drive - pre) <= 16, \
         f"the window sits {edge - (drive - pre):.2f} batches off the drive's end — not a round trip"
-
-
-@pytest.mark.cosim
-def test_readout_drive_length_reaches_the_dac(cosim):
-    """L1 (spec 14 F2) — the readout DRIVE length knob, gated where it is observable: the converter.
-    `Window` compiles the drive at the longest candidate and retunes the slot per point, so the
-    readout DAC's active window must be exactly the batches written — the proof the knob is applied
-    even though the projective model (which latches on the drive's rising edge) cannot see it.
-
-    One `rq.setup`: the whole point of a slot retune is that the image stays put (spec 08 §4)."""
-    drv, m = cosim
-    q = 0
-    drv.sim.set_model({"kind": "zero"})               # the readout DAC carries only the core's drive
-    cfg = _cfg(m, F_GE, relax=8)                  # L1: the relax head is not the subject
-    cfg[f"readout/{q}/dur"] = _s(56, m)
-    cfg[f"readout/{q}/demod/dur"] = _s(40, m)
-    a = units._amp_code(float(cfg[f"readout/{q}/amp"]))
-    prog, period = _ro_amp_prog(m, cfg, q, "X90", 1, 1, a << 16, 0)
-    rq.setup(drv, m, {q: prog})
-    for want in (56, 24, 8):
-        rq.write_slot(drv, m, q, prog, "ro", 0, "dur", want)
-        rq.check_magic(drv, m, q, prog)
-        rq.write_var(drv, m, q, prog, "__rq_status", 0)
-        rq.write_params(drv, m, q, prog, {"prep": 0})
-        h = drv.sim.dac_capture_arm(m.ro_dac(q), 1400)   # boot + one grid period (296) + the drive
-        rq.reset(drv, m, on=False)
-        rq.poll_done(drv, m, q, prog, timeout=batch_timeout(period))
-        rq.reset(drv, m, on=True)
-        _, cap = drv.sim.dac_capture_get(h)
-        active = cap.any(axis=1)
-        runs = [i for i in range(len(active)) if active[i]]
-        got = (runs[-1] - runs[0] + 1) if runs else 0
-        print(f"\n[ro-dur] wrote {want} batches, DAC drive = {got}")
-        assert got == want, f"wrote dur={want}, the readout DAC played {got} batches"
 
 
 def _dac_windows(t0, cap):
@@ -733,97 +691,54 @@ def _herald_cfg(m):
     return cfg
 
 
-def _assert_herald_geometry(cosim, prog, params, period, seqlen, ddly, drive, hoff, label):
-    """Play ONE heralded shot with the model off and pin the two-window grid on both converters:
-    two readout-drive windows exactly `hoff` apart, the `seqlen`-batch gate train between them, a
-    full LEAD of posting lead after the herald window closes (the read halts the core, so the next
-    drive is posted late — spec 16 §1.1), and a clean SEP before the measurement opens."""
+# ── §8 heralding: the two-window grid geometry, on the converters ──
+#
+# A `readout/herald` run inserts a readout BEFORE the sequence and post-selects on it finding the
+# qubit in |0>. The read HALTS the core, so the drive scheduled right after it needs the same
+# scheduling lead a normal shot has, or it posts too late and DROPS — the qubit never rotates and
+# every point reads |0> (and a fire that is merely LATE plays the PREVIOUS pulse's parameters,
+# SOC_TIPS §5). `herald_offset` is derived to give exactly that:
+#
+#     hoff = seq + delay + READOUT_LEAD + 2·SEP
+#         ⇒ (t_ro − SEP − seq) − (t_h + delay + READOUT_LEAD) == SEP
+#
+# which is a statement about WHEN pulses leave the converters, so that is where it is asserted.
+# The (count, kept) decode and its denominator are host-pure in test_cal_host. ONE test: there is
+# one kernel now (`k_batched`), so the three per-kernel copies this replaces cannot diverge.
+
+HERALD_NCAP = 16000      # the image load (~11.5 k batches) + boot + the one heralded shot
+
+
+@pytest.mark.cosim
+def test_herald_grid_geometry(cosim):
+    """L1 — one heralded Amplitude point through the production class, model off: two readout
+    windows `herald_offset` apart, the swept gate between them, a full LEAD of posting lead after
+    the herald window closes, and a clean SEP before the measurement opens."""
     drv, m = cosim
     q = 0
-    drv.sim.set_model({"kind": "zero"})            # the DACs carry only this core's own drive
-    rq.setup(drv, m, {q: prog})
+    cfg = _cfg(m, F_GE, x90_amp=0.495, relax=8)
+    cfg["readout/herald"] = True
+    drv.sim.set_model({"kind": "zero"})           # the DACs carry only this core's own drive
     caps = {d: drv.sim.dac_capture_arm(d, HERALD_NCAP) for d in (m.gate_dac(q), m.ro_dac(q))}
-    rq.rerun(drv, m, {q: prog}, params={q: params}, results=["out"],
-             timeout=batch_timeout(period))
+    Amplitude(cfg, q, n_gates=1, points=1, shots=1).run(drv)
     ro_win = _dac_windows(*drv.sim.dac_capture_get(caps[m.ro_dac(q)]))
     gate_win = _dac_windows(*drv.sim.dac_capture_get(caps[m.gate_dac(q)]))
-    print(f"\n[herald {label}] hoff={hoff} seq={seqlen} drive={drive} ddly={ddly} "
-          f"ro={ro_win} gate={gate_win}")
+    _, _, _, _, ddly = readout_tables(cfg, q, m)
+    drive = batches(cfg[f"readout/{q}/dur"], m)   # the measurement tone's LENGTH (not the window)
+    d = resolve(cfg, q, "x90", m).dur
+    print(f"\n[herald] seq={d} drive={drive} ddly={ddly} ro={ro_win} gate={gate_win}")
 
-    assert len(ro_win) == 2, f"{label}: a heralded shot plays TWO readout windows, the DAC shows {ro_win}"
+    assert len(ro_win) == 2, f"a heralded shot plays TWO readout windows, the DAC shows {ro_win}"
     (h_start, h_end), (m_start, _) = ro_win
-    assert h_end - h_start == drive and m_start - h_start == hoff, \
-        f"{label}: the herald read is not one full drive `hoff` before the measurement: {ro_win}"
-    assert len(gate_win) == 1 and gate_win[0][1] - gate_win[0][0] == seqlen, \
-        f"{label}: the sequence did not reach the gate DAC as one {seqlen}-batch train: {gate_win}"
+    assert h_end - h_start == drive, f"the herald read is not one full drive: {ro_win}"
+    assert m_start - h_start == herald_offset(d, ddly), \
+        f"the two windows are not `herald_offset` apart: {ro_win}"
+    assert len(gate_win) == 1 and gate_win[0][1] - gate_win[0][0] == d, \
+        f"the swept gate did not reach the gate DAC as one {d}-batch window: {gate_win}"
     g_start, g_end = gate_win[0]
     assert g_start - (h_start + ddly + READOUT_LEAD) == LEAD, \
-        f"{label}: the drive gets no full posting lead after the herald read (the drive-drop trap)"
-    assert m_start - g_end == SEP, \
-        f"{label}: the sequence does not end a clean SEP before the measurement"
-
-
-@pytest.mark.cosim
-def test_herald_grid_geometry_k_rabi(cosim):
-    """L1 (spec 13 §8) — the herald geometry of **k_rabi**, the gate-amplitude sweep's kernel
-    (Amplitude / the heralded Rabi curve). At `ngates = 1` the swept train is a single X90, so the
-    bracketed sequence — and `herald_offset`'s argument — is one gate long."""
-    _, m = cosim
-    q = 0
-    cfg = _herald_cfg(m)
-    table, pg, _ = prep(cfg, q, m, "X90")
-    ro, demod, code, dur, ddly = readout_tables(cfg, q, m)
-    d = table.pulses["x90"].dur_batches(m, table.channel)
-    seqlen = d                                     # ngates = 1: the paced train IS one gate
-    period = grid_period(relax_batches(cfg, m), seqlen, dur, ddly, herald=True)
-    hoff = herald_offset(seqlen, ddly)
-    prog = compile_kernel(kernels.k_rabi, m, tables=dict(gate=table, ro=ro, demod=demod),
-                          out=Array(2), npts=1, shots=1, period=period, ngates=1,
-                          step=train_step(d), code=code, mode=kernels.COUNTS, ddly=ddly,
-                          prep_gate=pg, herald=1, hoff=hoff, **x90_vz(cfg, q))
-    params = {"a0q": units._amp_code(0.495) << 16, "daq": 0, "prep": 1}
-    _assert_herald_geometry(cosim, prog, params, period, seqlen, ddly,
-                            batches(cfg[f"readout/{q}/dur"], m), hoff, "k_rabi")
-
-
-@pytest.mark.cosim
-def test_herald_grid_geometry_k_ro_amp(cosim):
-    """L1 (spec 13 §8) — the herald geometry of **k_ro_amp**, the readout-drive sweep's kernel
-    (Fidelity / ReadoutFidelity / Window). qcal's transpiler post-selects EVERY circuit, the
-    confusion circuits included, and here the bracketed sequence is the |1> prep itself: X90 · X90,
-    contiguous through B0's startTime auto-advance. Built by the production `_ro_amp_prog`."""
-    _, m = cosim
-    q = 0
-    cfg = _herald_cfg(m)
-    a = units._amp_code(float(cfg[f"readout/{q}/amp"]))
-    prog, period = _ro_amp_prog(m, cfg, q, "X90", 1, 1, a << 16, 0)
-    _, _, _, _, ddly = readout_tables(cfg, q, m)
-    _, _, seqlen = prep(cfg, q, m, "X90")          # the |1> prep's length: hoff's own argument
-    _assert_herald_geometry(cosim, prog, {"prep": 1}, period, seqlen, ddly,
-                            batches(cfg[f"readout/{q}/dur"], m),
-                            herald_offset(seqlen, ddly), "k_ro_amp")
-
-
-@pytest.mark.cosim
-def test_herald_grid_geometry_k_phase(cosim):
-    """L1 (spec 13 §8) — the herald geometry of **k_phase**, the virtual-Z calibration's kernel.
-    Its bracketed sequence is the longest of the three: qcal's three back-to-back X90s (here the
-    Y180_X90 fold), so `hoff` has to grow with it — which is the whole reason `seq` is an argument
-    of `herald_offset` and not a constant."""
-    _, m = cosim
-    q = 0
-    cfg = _herald_cfg(m)
-    gate = ParamTable(GATE_CH, F_GE, {"x90": gate_pulse(cfg, q, m)})
-    ro, demod, code, dur, ddly = readout_tables(cfg, q, m)
-    seqlen = 3 * gate.pulses["x90"].dur_batches(m, gate.channel)      # three back-to-back X90s
-    period = grid_period(relax_batches(cfg, m), seqlen, dur, ddly, herald=True)
-    hoff = herald_offset(seqlen, ddly)
-    prog = compile_kernel(kernels.k_phase, m, tables=dict(gate=gate, ro=ro, demod=demod),
-                          out=Array(2), npts=1, shots=1, period=period, code=code, ddly=ddly,
-                          seq=kernels.Y180_X90, hpi=pack16(units._phase_code(math.pi / 2)),
-                          vz0=0, vzsum=0, herald=1, hoff=hoff)
-    _assert_herald_geometry(cosim, prog, {"p0": pack16(0), "dp": pack16(0)}, period, seqlen, ddly,
-                            batches(cfg[f"readout/{q}/dur"], m), hoff, "k_phase")
+        "the drive gets no full posting lead after the herald read (the drive-drop trap)"
+    assert m_start - g_end == SEP, "the sequence does not end a clean SEP before the measurement"
 
 
 # ── §7 cost accounting: a batched cal is O(1) client seam ops in one run ──

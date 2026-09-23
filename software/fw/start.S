@@ -1,5 +1,12 @@
 /* riscq bare-metal entry: sp to RAM top, zero .bss, __rq_status = RUNNING, call main,
- * publish DONE (0xD04E0000 | main's low 16 return bits), park. */
+ * publish DONE (0xD04E0000 | main's low 16 return bits), raise the hardware DONE register, park.
+ *
+ * The host detects completion from the hardware register (RQ_CTRL_DONE, specs/software/23), not from
+ * __rq_status — polling that word would read the core's RAM through the port instruction fetch shares
+ * with the host image-load master. __rq_status stays as the exit-code carrier, and it is written
+ * FIRST so a host that reads it after the poll sees the finished value. */
+
+#include "riscq_map.h"
 
     .section .text.init, "ax"
     .globl _start
@@ -20,6 +27,9 @@ _start:
     srli a0, a0, 16
     lui  t1, 0xD04E0
     or   t1, t1, a0
+    sw   t1, 0(t0)
+    li   t0, RQ_CTRL_DONE         /* the program's LAST store: the host polls this register */
+    li   t1, 1
     sw   t1, 0(t0)
 3:  j    3b                       /* park */
 

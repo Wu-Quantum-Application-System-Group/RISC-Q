@@ -34,9 +34,16 @@ read/write fibers over their RAMs; the envelope path uses the write-only fiber f
   line up with `io.port.rdata`). This is sound because **both CPU masters hold `d.ready` permanently
   high** — [FetchPlugin](../riscv/FetchPlugin.md)'s `iBus.d.ready := True` and the
   [LsuPlugin](../riscv/LsuPlugin.md) data path through `DataMemBusToTilelink` (single-outstanding,
-  `d.ready := True`) — and the host image-load shares the slow port only *while the core is held in
-  reset*, so it never overlaps fetch. The d-channel is therefore never back-pressured and there is
-  nothing for an elastic buffer to absorb. A simulation `assert` guards that premise.
+  `d.ready := True`) — and the host master, which *does* overlap fetch (a mid-run global rewrite, a
+  result read-back), can never have more responses outstanding than the path back to it can hold.
+  That is the real invariant, and it is arithmetic, not a usage rule:
+  **`Axi4ToTilelinkFiber(slotsCount)` ≤ the d-channel buffering between this slave and that bridge.**
+  In [PulseTableSoc](PulseTableSoc.md) that is 4 ≤ 14 — three `StreamPipe.FULL` connections (2 beats
+  each) on `hostBus → riscqMemBus → iMemPortArb` plus the dsp→host `FifoCc`'s `dDepth` of 8 — and a
+  `require` there keeps it honest. The d-channel is therefore never back-pressured and there is
+  nothing for an elastic buffer to absorb. A simulation `assert` guards that premise. Anything that
+  raises `slotsCount`, or issues bursts into the core RAM, must re-check the arithmetic
+  (see [specs/software/23](../../specs/software/23-done-register.md) §1.3).
 - **Width matching: only the write-only fiber bridges sub-word.** The read/write and CPU-mem fibers
   *force* the bus word equal to the RAM word (`forceDataWidth`), so they carry no byte-lane logic.
   `TileLinkMemWriteLogic` is the one that bridges a (possibly wider) RAM word to a narrower bus by

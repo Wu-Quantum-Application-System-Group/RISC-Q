@@ -1,11 +1,11 @@
 # Zcu216Top — ZCU216 board toplevel scaffolding
 
 **Source:** `src/riscq/soc/Zcu216Top.scala`, `src/riscq/soc/Zcu216TopFlat.scala` · **Package:** `riscq.soc`
-· **Type:** abstract Component (`Zcu216Top`), Component (`Zcu216TopFlat`), Bundle (`RiscqZcu216SocPorts`),
-case class (`SocMemoryMap`)
+· **Type:** abstract Component (`Zcu216Top`), Component (`Zcu216TopFlat`), Bundle (`RiscqZcu216SocPorts`)
 
 The board-level scaffolding that wraps [`PulseTableSoc`](PulseTableSoc.md) for the ZCU216 RFSoC
-(`xczu49dr`): the two clock domains, the external AXI / converter ports, and the host-AXI address map.
+(`xczu49dr`): the two clock domains and the external AXI / converter / DIO ports. The host-AXI address
+map is derived from the build description — `SocSpecMap` in [`SocSpec`](SocSpec.md).
 `Zcu216Top` is the abstract base `PulseTableSoc extends`; `Zcu216TopFlat` is a full board integration that
 instantiates the Xilinx PS + RF Data Converter as blackboxes.
 
@@ -25,19 +25,19 @@ analysis work. This is **off by default** so the single-clock OOC bench — whic
 
 ### `RiscqZcu216SocPorts`
 
-The external ports: `dspClk`/`dspRst`, a slave `Axi4` host port (32-bit addr/data, 2-bit id), and per
-converter a master `Stream` DAC (16-lane × 16-bit word) and a slave `Stream` ADC (4-lane × 16-bit). The
-converters are free-running — DAC `valid` is tied high, ADC `ready` tied high. Under `vivado = true` the
-AXI and AXI-Stream ports carry the `X_INTERFACE_INFO` attributes (`S_AXIS`, `DAC{i}_AXIS`, `ADC{i}_AXIS`)
-the IP packager needs; on the default they are plain scalar ports the functional sims/benches expect.
+The external ports: `dspClk`/`dspRst`, a slave `Axi4` host port (32-bit addr/data, 2-bit id), a
+write-only `Axi4` `hostMem` master into the PS DDR4 ([HostWindow](HostWindow.md)), and per converter a
+master `Stream` DAC (16-lane × 16-bit word) and a slave `Stream` ADC (4-lane × 16-bit). The converters are
+free-running — DAC `valid` is tied high, ADC `ready` tied high. Under `vivado = true` the AXI and
+AXI-Stream ports carry the `X_INTERFACE_INFO` attributes (`S_AXIS`, `M_AXI_HOST`, `DAC{i}_AXIS`,
+`ADC{i}_AXIS`) the IP packager needs; on the default they are plain scalar ports the functional
+sims/benches expect.
 
-### `SocMemoryMap`
-
-The host-AXI address map, **derived** from the per-window byte sizes rather than scattered literals. One
-equal top-level region per window-class (instruction RAM / gate-drive envelope / readout-drive envelope /
-readout buffers / host control); within each region the `qubitNum` per-core sub-windows are a power-of-two
-`*Stride` apart. Only the host-AXI side lives here; the CPU-visible per-core `dBus` offsets are in
-[`RiscvSoc`](RiscvSoc.md) / [`ControlMemMaps`](ControlMemMaps.md).
+**Timed digital I/O.** The `dio: Seq[String]` constructor argument — `PulseTableSoc.dioNames(spec)`, one
+`<core>_<channel>` entry per `dio` channel of the build — adds a port pair per bank:
+`dio_<core>_<channel>_out` (16 bits, out) and `dio_<core>_<channel>_in` (16 bits, in), emitted as
+`io_dio_<core>_<channel>_out` / `_in`. Builds with no `dio` channel get none. See
+[`TimedDio`](TimedDio.md).
 
 ## `Zcu216TopFlat` — the flat board integration
 
@@ -83,5 +83,7 @@ Both bake the two-region floorplan (cores in X0, datapath in X1–X5) via the pe
 ## Related
 
 - [`PulseTableSoc`](PulseTableSoc.md) — the SoC this wraps.
+- [`SocSpec`](SocSpec.md) — the build description and the derived host map (`SocSpecMap`).
+- [`TimedDio`](TimedDio.md) — what sits behind the `dio` port pairs.
 - [`ARCH.md`](ARCH.md) — the posted-link architecture + two-region floorplan.
 - [`SOC_TIPS.md`](SOC_TIPS.md) §8 — hardware-build gotchas (PS/RFDC blackboxes, the IP OOC run).

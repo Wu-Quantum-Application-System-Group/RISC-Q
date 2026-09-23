@@ -91,10 +91,10 @@ def test_converter_map_round_trips_through_json():
 
 
 def test_default_converter_map_unchanged_without_maps():
-    """A config with no dac_map/adc_map (sim-2q, zcu216-14q) keeps the generic ZCU216 layout: gate on
-    the core's own DAC, readout drive on 14/15, demod on ADC 0/4."""
+    """A config with no dac_map/adc_map (sim-2q, zcu216-14q) gets the generic ZCU216 layout on
+    load: gate on the core's own DAC, readout drive on 14/15, demod on ADC 0/4."""
     m = _map("sim-2q")
-    assert m.params.dac_map is None and m.params.adc_map is None
+    assert m.params.dac_map == ((0, 14), (1, 14)) and m.params.adc_map == (0, 0)
     assert (m.gate_dac(0), m.gate_dac(1)) == (0, 1)
     assert (m.ro_dac(0), m.adc_of(0)) == (14, 0)
     m14 = _map("zcu216-14q")
@@ -111,6 +111,10 @@ def test_core_local_constants():
     assert m.RF_DC_OFFSET == 0x8
     assert m.RF_PHASE_OFFSET == 0xC
     assert (m.HOST_RESET, m.HOST_TIME_OFF_LO, m.HOST_TIME_OFF_HI) == (0x0, 0x40, 0x44)
+    assert (m.HOST_HOSTWIN_LO, m.HOST_HOSTWIN_HI) == (0x48, 0x4C)
+    assert (m.HOSTWIN, m.HOSTWIN_BYTES) == (0x40000000, 1 << 24)
+    assert [m.hostwin_offset(c) for c in range(2)] == [0, 1 << 24]
+    assert m.hostwin_bytes_total == 2 << 24
     assert m.LEAD == 96   # pinned by the M1 lead-margin test (64 measured insufficient)
 
 
@@ -120,6 +124,8 @@ def test_generated_header_values():
     assert "#define RQ_MEM_BYTES 0x4000" in h
     assert "#define RQ_CTRL_TIME 0xbff8" in h
     assert "#define RQ_GATE 0x10000" in h
+    assert "#define RQ_HOSTWIN 0x40000000" in h
+    assert "#define RQ_HOSTWIN_BYTES 0x1000000" in h
     assert "#define RQ_DEMOD 0x30000" in h
     assert "RQ_DECODER" not in h                 # decoder RF window removed (carrier-triggered)
     assert "#define RQ_RO_MAX_WIN 0x4000" in h   # 2^14 window cap
@@ -136,15 +142,23 @@ def test_channel_table():
     from riscq.map import ChannelInfo
 
     m = _map("sim-2q")
-    assert m.channels() == [
-        ChannelInfo(0, "RF_CH0", 0x10000, 8, 4, 16),   # gate drive: 8 slots, 4 samples/line
-        ChannelInfo(1, "RF_CH1", 0x20000, 1, 1, 4),    # readout drive: 1 slot, 1 sample/line
-        ChannelInfo(2, "RF_CH2", 0x30000, 1, 1, 4),    # demod carrier: 1 slot, 1 ADC-batch sample/line
+    head = [(c.index, c.cname, c.base, c.slot_count, c.samples_per_line, c.line_bytes)
+            for c in m.channels()]
+    assert head == [
+        (0, "RF_CH0", 0x10000, 8, 4, 16),   # gate drive: 8 slots, 4 samples/line
+        (1, "RF_CH1", 0x20000, 1, 1, 4),    # readout drive: 1 slot, 1 sample/line
+        (2, "RF_CH2", 0x30000, 1, 1, 4),    # demod carrier: 1 slot, 1 ADC-batch sample/line
     ]
+    assert [(c.name, c.kind, c.lanes, c.env_depth) for c in m.channels()] == [
+        ("gate", "pulse", 16, 1024), ("ro", "pulse", 16, 1024), ("demod", "demod", 4, 1024)]
+    assert [(c.dac, c.adc) for c in m.channels(1)] == [(1, None), (14, None), (None, 0)]
     assert m.channel(0) == m.channels()[0]
     assert m.channel(2) == m.channels()[2]
+    assert m.channel_named("ro") == m.channels()[1]
+    assert isinstance(m.channel(0), ChannelInfo)
     with pytest.raises(ValueError, match="unknown channel index"):
         m.channel(3)
+    assert m.rf_addr_width() == 28
 
 
 def test_channel_defines_in_header():
@@ -152,6 +166,7 @@ def test_channel_defines_in_header():
     assert "#define RF_CH0 0x10000" in h
     assert "#define RF_CH1 0x20000" in h
     assert "#define RF_CH2 0x30000" in h
+    assert "#define RQ_CH_GATE 0x10000" in h and "#define RQ_CH_DEMOD 0x30000" in h
 
 
 def test_generated_linker_values():

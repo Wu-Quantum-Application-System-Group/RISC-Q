@@ -7,36 +7,44 @@ import spinal.lib.misc.plugin.Hostable
 import spinal.lib.bus.tilelink
 import spinal.lib.bus.misc.SizeMapping
 import spinal.lib.bus.tilelink.fabric.{Node, MasterBus}
-import riscq.dsp.{ComplexBatch, SinCosMethod}
+import riscq.dsp.{Complex, ComplexBatch, SinCosMethod}
 import riscq.dsp.pulse.{ReadoutDecoder, ReadoutDecoderParams}
 import riscq.riscv.RiscqParam
 import riscq.soc.fabric.BramWriteFiber
-import riscq.soc.rf.{PulseDriveChannel, DemodChannel}
-import riscq.soc.link.{RfLink, ReadoutResultLink, RfCmd}
+import riscq.soc.rf.{Channel, PulseDriveChannel, DemodChannel}
+import riscq.soc.dio.TimedDio
+import riscq.soc.link.{RfLink, EventLink, EventPlan, EventSource, RfCmd, HostCmd}
+import riscq.soc.spec.SocSpecMap
+import riscq.soc.spec.{ChannelSpec, CoreSpec, SocSpecMap}
 
 /**
- * One qubit core — the agentic counterpart of the RISC-Q reference `RiscqRfWithPulseTableFiber`. After
- * the registered-boundary floorplan carve-out this is a **thin shell**: a hard [[RiscvSoc]] Component
- * (the timing-critical RISC-V core + I/D RAM + control block + posted-link bridge + readout-result sink)
- * plus the converter-edge DSP datapath reached over the **narrow, one-way, posted link** — two pulse
- * drives, a demod LO and a readout decoder — so the core can be floorplanned far from the converters.
+ * One core — the shell around a hard [[RiscvSoc]] Component (the timing-critical RISC-V core + I/D RAM
+ * + control block + posted-link bridge + readout-result sink) plus the converter-edge DSP datapath
+ * reached over the **narrow, one-way, posted link**. The datapath is built from the core's
+ * [[CoreSpec]] channel list (specs/universal-control/01 §2.3): channel `k` gets sub-window
+ * `k · 0x10000` of the RF window, its own host-written envelope bank, and its kind's block — a
+ * [[PulseDriveChannel]] for `pulse` (DAC-bound) or a [[DemodChannel]] + [[ReadoutDecoder]] for `demod`
+ * (ADC-bound; its result rides the up-link into the core-local sink). The qubit builds list
+ * `gate / ro / demod`, which reproduces the previous fixed three-channel shell exactly.
  *
  * The split is at the already-registered seam (the posted link): [[RiscvSoc]] exposes `cmd`
  * (posted RF writes, from the `RfLinkBridge`) and `resultIn` (the readout result, into the
  * `ReadoutResultSink`); this shell applies the `linkPipe` RegNext stages each way and demuxes `cmd` to
- * the per-generator channels. Everything past `getPipe(riscvSoc.cmd, linkPipe)` — the demux, the
- * channels, the decoder, the envelope BRAMs, dac/adc — lives here (the parent), not in [[RiscvSoc]].
+ * the channels. Everything past `getPipe(riscvSoc.cmd, linkPipe)` — the demux, the channels, the
+ * decoder, the envelope BRAMs, dac/adc — lives here (the parent), not in [[RiscvSoc]], so the core can
+ * be floorplanned far from the converters.
  *
  * CPU data-bus decode and the `0x10000` RF window / `0x80000000` data-RAM maps are all inside
  * [[RiscvSoc]] now; the host program/data image load enters [[RiscvSoc]] over its (dspCd) `iLoad`
  * slave-IO, re-exposed here as the `iMemPortArb` fabric node — the node that now carries the host→dsp
  * clock crossing (moved out of [[RiscvSoc]]), so the toplevel wiring is otherwise unchanged.
  *
- * Differences from the reference: the pulse-envelope RAM is **512-bit** complex; the DAC carries only
- * the real lane; the readout result returns on the posted up-link. `linkPipe` is the per-direction
+ * Differences from the RISC-Q reference: the pulse-envelope RAM is **512-bit** complex; the DAC carries
+ * only the real lane; the readout result returns on the posted up-link. `linkPipe` is the per-direction
  * `RegNext` depth.
  */
 case class RiscqRfWithPulseTableFiber(
+    spec: CoreSpec,
     plugins: Seq[Hostable],
     dspCd: ClockDomain,
     hostCd: ClockDomain,
@@ -47,41 +55,41 @@ case class RiscqRfWithPulseTableFiber(
     timeWidth: Int = 32,
     durWidth: Int = 16,
     adcBatch: Int = 4,
-    gatePulseNum: Int = 8,
     readoutMaxWinLog2: Int = 14,  // decoder no-overflow bound: longest demod window ≤ 2^this batches
     readoutAccWidth: Int = 32,
     prescaleAmp: Boolean = true,
     saturate: Boolean = false,
     phasorMethod: SinCosMethod = SinCosMethod.Cordic,
-    memDepth: Int = 1024,
     memWidth: Int = 32,
     memOutReg: Boolean = true,
-    envDepth: Int = 1024,
-    readoutInterp: Int = 16,
-    gateInterp: Int = 4,
-    demodInterp: Int = 4,
-    demodPulseNum: Int = 1,
     linkPipe: Int = 4,
-    queueDepth: Int = 4,          // per-parameter TimedQueue depth in every drive/demod PulseGenerator
-    withTestTap: Boolean = false
+    hostWinAddrWidth: Int = 24,   // per-core host window (24 ⇒ 16 MB)
+    hostWinFifoDepth: Int = 16,   // CC FIFO depth: a shot tail is 2-3 words, so every core can finish
+                                  // a shot at once without stalling
+    withTestTap: Boolean = false,
+    hubQueueDepth: Int = 16       // ≥ the cores on the board: a same-cycle burst of hub beats never drops
 ) extends Area {
   val w        = dataWidth
-  // envelope read-port address width = the envelope RAM's own address width (log2Up(envDepth)). Derived,
-  // not a knob: the pulse-table `env` field, the channel `memPort` address, and the RAM address port all
-  // key off this, so an independent value would silently under-address a deeper bank (env_depth > 1024).
-  val envAddrWidth = log2Up(envDepth)
-  val envWidth = batchSize * 2 * w          // complex envelope line (512 for N=16, w=16)
+  val memDepth = spec.memDepth
   val memLatency = 1 + memOutReg.toInt      // envelope RAM read latency (sync read + out reg)
-  // 0x40000-byte RF window: gate 0x00000, readout drive 0x10000, demod 0x20000. The old decoder
-  // sub-window 0x30000 is unmapped/reserved (the carrier-triggered decoder needs no CPU register), so
-  // every existing channel address is unchanged and rfAddrWidth stays 18.
-  val rfAddrWidth = 18
+  // The RF window: channel k owns sub-window k · 0x10000 (RfLink.demux below); the width covers the
+  // core's channel count (18 on the three-channel qubit builds, where 0x30000 stays unmapped).
+  val rfAddrWidth = SocSpecMap.rfAddrWidth(spec)
+  val demods = spec.channels.filter(_.kind == "demod")
+  require(demods.length == 1, s"core '${spec.name}': exactly one demod channel per core (one decoder + ADC)")
+  // the up-link layout for this channel list: which channels report, sink kinds and bases
+  val eventPlan = EventPlan(spec, readoutAccWidth)
 
   // ════════════════════════ the timing-critical core unit (hard Component) ═════════════════════════
   val riscvSoc = RiscvSoc(
     plugins = plugins, riscqCd = riscqCd,
     timeWidth = timeWidth, readoutAccWidth = readoutAccWidth, memDepth = memDepth, memWidth = memWidth,
-    memOutReg = memOutReg, rfAddrWidth = rfAddrWidth, withTestTap = withTestTap)
+    memOutReg = memOutReg, rfAddrWidth = rfAddrWidth, hostWinAddrWidth = hostWinAddrWidth,
+    sinks = eventPlan.allSinks, withTestTap = withTestTap)
+
+  /** The hub's puts for this core (already gated by its mask bit and piped by the parent), merged onto
+    * the up-link with the channels' reports. The SoC top drives it. */
+  val hubIn = Flow(RfCmd(EventLink.inboxAddrWidth))
   riscvSoc.time     := time
 
   // re-expose the host program/data image-load entry as a fabric node (the toplevel connects host
@@ -106,6 +114,25 @@ case class RiscqRfWithPulseTableFiber(
   } }
   val iMemPortArb = iMemLoad.up
 
+  // ── host window: the core's posted result stream crosses riscq → host HERE, outside the hard
+  // RiscvSoc Component (and outside the core's pblock), exactly where `iMemLoad` puts the host→dsp
+  // image-load CDC. The pop side is `hostCd`, where the shared `HostWindowFunnel` lives.
+  //
+  // The push side is `dspCd`, NOT `riscqCd`: `riscqCd` is the same clock with the per-run core reset,
+  // and a cross-clock FIFO whose push pointer is zeroed per run while its pop pointer is not would
+  // desync (the pop side would see a huge fake occupancy). Same clock ⇒ the bridge's riscqCd-driven
+  // Stream feeds it directly, and a reset mid-run simply drops `valid` — beats are atomic, so nothing
+  // is torn; whatever was already accepted drains to the same addresses (the base is allocated once per
+  // session), which is idempotent.
+  val hostWinFifo = StreamFifoCC(HostCmd(hostWinAddrWidth), hostWinFifoDepth, dspCd, hostCd)
+  hostWinFifo.io.push << riscvSoc.hostCmd
+  val hostCmd = hostWinFifo.io.pop
+
+  // run-completion flag (specs/software/23): a plain level out of the core, crossed to `hostCd` by the
+  // toplevel's BufferCC alongside the other host-control registers. Nothing to buffer — it is sticky
+  // until `riscqReset` clears it.
+  val done = riscvSoc.done
+
   // re-expose the CPU data-bus decode as a tap node for the test harness (withTestTap only): the
   // toplevel's test master connects here and the requests bridge into RiscvSoc's `dTap` slave-IO,
   // mirroring the iMemLoad bridge. Null when no test tap (the real SoC: the CPU is the sole master).
@@ -121,19 +148,19 @@ case class RiscqRfWithPulseTableFiber(
   } }
   val dMemPortDec = if (withTestTap) dMemTap.up else null   // the test-master connection point
 
-  // ── host-loaded complex pulse-envelope memory (write-only host side; read by the channels below) ──
+  // ── host-loaded complex envelope memory, one write-only bank per channel (read by the channel) ──
   // Write-only banks: the host only ever loads these, so each uses BramWriteFiber (a tiny combinational
   // write slave + narrow-host-bus→wide-line sub-word steering) instead of the read/write BramFiber.
-  require(batchSize % readoutInterp == 0, "readoutInterp must divide the batch size")
-  require(batchSize % gateInterp == 0, "gateInterp must divide the batch size")
-  require(adcBatch % demodInterp == 0, "demodInterp must divide the ADC batch size")
-  val demodEnvFull    = adcBatch * 2 * w    // full demod-carrier envelope line (128 for adcBatch=4, w=16)
-  val readoutEnvWidth = envWidth / readoutInterp
-  val gateEnvWidth    = envWidth / gateInterp
-  val demodEnvWidth   = demodEnvFull / demodInterp
-  val pulseMemFiber   = hostCd(BramWriteFiber(1, gateEnvWidth,    envDepth, hostCd, dspCd, withOutReg = memOutReg))
-  val readoutMemFiber = hostCd(BramWriteFiber(1, readoutEnvWidth, envDepth, hostCd, dspCd, withOutReg = memOutReg))
-  val demodMemFiber   = hostCd(BramWriteFiber(1, demodEnvWidth,   envDepth, hostCd, dspCd, withOutReg = memOutReg))
+  // The bank stores the INTERPOLATED line (`envWidth`), shrinking the widest BRAM banks; `expandEnv`
+  // below reconstructs the full lane batch on read. Named `<channel>MemFiber`.
+  // (a kind without a bank — dio — has envDepth 0 and no fiber; its host-map slot stays a hole)
+  val envMems: Seq[Option[BramWriteFiber]] = spec.channels.map { ch =>
+    if (ch.envDepth == 0) None else {
+      val f = hostCd(BramWriteFiber(1, ch.envWidth, ch.envDepth, hostCd, dspCd, withOutReg = memOutReg))
+      f.setCompositeName(this, s"${ch.name}MemFiber")
+      Some(f)
+    }
+  }
 
   // ════════════════════════ converter-edge DSP datapath, reached over the posted link ══════════════
   def getPipe[T <: Data](data: T, cycles: Int): T = {
@@ -146,30 +173,37 @@ case class RiscqRfWithPulseTableFiber(
   }
 
   val posted = dspCd { new Composite(this, "posted") {
-    // one CPU-writable drive channel off a demuxed sub-window of the (piped) posted command stream.
-    def mkDriveChannel(pulseNum: Int, base: BigInt, cmdDn: Flow[RfCmd]) = {
-      val ch = PulseDriveChannel(pulseNum = pulseNum, batchSize = batchSize, dataWidth = w,
-        envAddrWidth = envAddrWidth, durWidth = durWidth, timeWidth = timeWidth, memLatency = memLatency,
-        prescaleAmp = prescaleAmp, saturate = saturate, phasorMethod = phasorMethod, realOutput = true,
-        queueDepth = queueDepth)
-      ch.io.cmd << RfLink.demux(cmdDn, base, 0x10000, 16)
-      ch.io.timeBcast := time
-      ch
+    // One channel per spec entry off its demuxed sub-window of the (piped) posted command stream — each
+    // channel pipes the stream itself (per-channel `linkPipe` copies keep the pipe fanout at one).
+    // A pulse table of ≥ 2 slots lands in distributed RAM (PulseParamBuffer.useMem); a 1-slot channel
+    // has no addressable table and stays a register file automatically.
+    def mkChannel(ch: ChannelSpec, k: Int): Channel = {
+      val envAddrWidth = log2Up(ch.envDepth)   // the bank's own address width — the table `env` field,
+                                               // the memPort and the RAM address port all key off it
+      val c: Channel = ch.kind match {
+        case "pulse" =>
+          PulseDriveChannel(pulseNum = ch.slots, batchSize = batchSize, dataWidth = w,
+            envAddrWidth = envAddrWidth, durWidth = durWidth, timeWidth = timeWidth, memLatency = memLatency,
+            prescaleAmp = prescaleAmp, saturate = saturate, phasorMethod = phasorMethod, realOutput = true,
+            queueDepth = spec.queueDepth)
+        case "dio" =>
+          TimedDio(slots = ch.slots, timeWidth = timeWidth, durWidth = durWidth, queueDepth = spec.queueDepth)
+        case "demod" =>
+          // the demod carrier: a scheduled, envelope-shaped complex pulse (a PulseDriveChannel pointed at
+          // the decoder). Its posted RF sub-window carries the same fire/freq/table/startTime map as a
+          // drive channel; software programs a matched-filter envelope once and fires the demod aligned
+          // with the readout window. adcBatch lanes (the ADC batch), not batchSize.
+          DemodChannel(pulseNum = ch.slots, batchSize = adcBatch, dataWidth = w,
+            envAddrWidth = envAddrWidth, durWidth = durWidth, timeWidth = timeWidth, memLatency = memLatency,
+            prescaleAmp = prescaleAmp, saturate = saturate, phasorMethod = phasorMethod, queueDepth = spec.queueDepth)
+      }
+      c.setCompositeName(this, s"${ch.name}Channel")
+      c.cmd << RfLink.demux(getPipe(riscvSoc.cmd, linkPipe), k * SocSpecMap.rfChStride, SocSpecMap.rfChStride, 16)
+      c.timeBcast := time
+      c
     }
-    // The gate table lands in distributed RAM (PulseParamBuffer.useMem defaults on for pulseNum ≥ 2);
-    // the ro channel (pulseNum = 1) has no addressable table so it stays a register file automatically.
-    val gateChannel = mkDriveChannel(gatePulseNum, 0x0,     getPipe(riscvSoc.cmd, linkPipe))
-    val roChannel   = mkDriveChannel(1,            0x10000, getPipe(riscvSoc.cmd, linkPipe))
-
-    // demod carrier: a scheduled, envelope-shaped complex pulse (a PulseDriveChannel pointed at the
-    // decoder). Its posted RF sub-window carries the same fire/freq/table/startTime map as a drive
-    // channel; software programs a matched-filter envelope once and fires the demod aligned with the
-    // readout window. adcBatch lanes (the ADC batch), not batchSize.
-    val demodChannel = DemodChannel(pulseNum = demodPulseNum, batchSize = adcBatch, dataWidth = w,
-      envAddrWidth = envAddrWidth, durWidth = durWidth, timeWidth = timeWidth, memLatency = memLatency,
-      prescaleAmp = prescaleAmp, saturate = saturate, phasorMethod = phasorMethod, queueDepth = queueDepth)
-    demodChannel.io.cmd << RfLink.demux(getPipe(riscvSoc.cmd, linkPipe), 0x20000, 0x10000, 16)
-    demodChannel.io.timeBcast := time
+    val channels: Seq[Channel] = spec.channels.zipWithIndex.map { case (ch, k) => mkChannel(ch, k) }
+    val demodChannel = channels(spec.channels.indexWhere(_.kind == "demod"))
 
     // readout decoder: CARRIER-TRIGGERED — the demod carrier's Flow valid delimits the integration
     // window (rising edge restarts the accumulator, falling edge latches the result), so there is no
@@ -178,22 +212,38 @@ case class RiscqRfWithPulseTableFiber(
     val decoder = ReadoutDecoder(ReadoutDecoderParams(
       batchSize = adcBatch, dataWidth = w, accWidth = readoutAccWidth,
       maxWinLog2 = readoutMaxWinLog2, saturate = saturate))
-    decoder.io.carrier << demodChannel.io.carrier.stage()
+    decoder.io.carrier << demodChannel.carrier.get.stage()
 
-    // result up-link → the core-local sink inside RiscvSoc: res.valid is forwarded as a LEVEL (the
-    // decoder holds it high from settle until the next window's start), so the sink mirrors it.
-    val upSrc = ReadoutResultLink.source(decoder.io.res.valid, decoder.io.res.payload, decoder.io.real, decoder.io.imag, readoutAccWidth)
+    // the up-link: every reporting channel's source, in the plan's order (the demod reports through the
+    // decoder here — it is the one kind whose source needs the ADC), serialised into puts at its sink's
+    // offsets, merged onto one Flow(RfCmd) and piped `linkPipe` stages into RiscvSoc's inbox.
+    val sources: Seq[EventSource] = eventPlan.reporters.map { case (k, _, _, _) =>
+      spec.channels(k).kind match {
+        case "demod" => EventLink.resultSource(decoder.io.res.valid, decoder.io.res.payload, decoder.io.real, decoder.io.imag, readoutAccWidth)
+        case _       => channels(k).event.get
+      }
+    }
+    val hubQ  = hubIn.toStream.queue(hubQueueDepth)   // a burst of hub beats waits here for the arbiter
+    val upSrc = EventLink.merge(sources, eventPlan.sinks, extra = Seq(hubQ))
     riscvSoc.resultIn << getPipe(upSrc, linkPipe)
+
+    /** This core's system puts (node ≥ localNodes) for the board hub, on their own piped copy. */
+    val xput = RfLink.nonLocal(getPipe(riscvSoc.cmd, linkPipe), SocSpecMap.localNodes)
   } }
 
-  // ── datapath handles exported to the rest of the qubit core / SoC ──
-  val gatePulse      = posted.gateChannel.io.pulse
-  val readoutPulse   = posted.roChannel.io.pulse
-  val gateMemPort    = posted.gateChannel.io.memPort
-  val readoutMemPort = posted.roChannel.io.memPort
-  val demodMemPort   = posted.demodChannel.io.memPort
+  // ── datapath handles exported to the rest of the SoC (by channel name / kind, never by position) ──
+  def channel(name: String): Channel = posted.channels(spec.index(name))
+  def xput = posted.xput
+  /** DAC-bound channels' pulses, in list order — the index the SoC's `(core, k) → dac` map uses. */
+  val dacPulses: Seq[Flow[Vec[Complex]]] = posted.channels.flatMap(_.dacOut)
+  /** the pulses whose fires trigger the shared readout trace (`trace: true` channels) */
+  val tracePulses: Seq[Flow[Vec[Complex]]] =
+    spec.channels.zip(posted.channels).collect { case (s, c) if s.trace => c.dacOut.get }
   val decoderRd      = posted.decoder
-  val startTime      = posted.gateChannel.startTime    // gate buffer's per-buffer startTime (sims observe it)
+  // qubit-build conveniences (the sims observe them); absent channels raise at elaboration
+  def gatePulse      = channel("gate").dacOut.get
+  def readoutPulse   = channel("ro").dacOut.get
+  def startTime      = channel("gate").asInstanceOf[PulseDriveChannel].startTime  // gate buffer's per-buffer startTime
 
   // ── envelope-memory read ports (reconstruct the full `lanes`-lane batch from the interpolated line) ──
   def expandEnv(data: Bits, interp: Int, lanes: Int): Bits =
@@ -208,14 +258,17 @@ case class RiscqRfWithPulseTableFiber(
     p.address := memPort.cmd.payload
     memPort.rsp := expandEnv(p.rdata, interp, lanes)
   }
-  wireEnv(pulseMemFiber.rams(0),   gateMemPort,    gateInterp,    batchSize)
-  wireEnv(readoutMemFiber.rams(0), readoutMemPort, readoutInterp, batchSize)
-  wireEnv(demodMemFiber.rams(0),   demodMemPort,   demodInterp,   adcBatch)
+  for (((ch, c), Some(mem)) <- spec.channels.zip(posted.channels).zip(envMems)) {
+    require(c.envLanes % ch.interp == 0, s"${spec.name}/${ch.name}: interp ${ch.interp} must divide ${c.envLanes} lanes")
+    wireEnv(mem.rams(0), c.memPort.get, ch.interp, c.envLanes)
+  }
+  /** the timed-DIO channels, by spec, for the toplevel's board ports */
+  val dios: Seq[(ChannelSpec, TimedDio)] =
+    spec.channels.zip(posted.channels).collect { case (ch, d: TimedDio) => (ch, d) }
 
   // ── DAC (real lane only) + ADC ──
-  val dac = List.fill(2)(ComplexBatch(batchSize, w))
-  dac(0) := gatePulse.payload
-  dac(1) := readoutPulse.payload
+  val dac = dacPulses.map(_ => ComplexBatch(batchSize, w)).toList
+  for ((d, p) <- dac.zip(dacPulses)) d := p.payload
   val adc = ComplexBatch(adcBatch, w)
   decoderRd.io.adc := adc
 }

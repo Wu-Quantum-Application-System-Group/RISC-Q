@@ -93,7 +93,7 @@ object PulseTableSocSim extends App {
       axi.write(BigInt(dut.map.coreMemOffset(core)) + word.toLong * 4, leBytes(v, 4))
     val gateEnvBytes = (N / gateInterp) * 2 * w / 8                 // bytes per interpolated gate line (16)
     def loadEnv(core: Int, a: Int, word: BigInt): Unit = {
-      val wordAddr = BigInt(dut.map.pulseMemOffset(core)) + a.toLong * gateEnvBytes
+      val wordAddr = BigInt(dut.map.envOffset(core, 0)) + a.toLong * gateEnvBytes
       for (lane <- 0 until gateEnvBytes / 4) axi.write(wordAddr + lane * 4, leBytes(word >> (lane * 32), 4))
     }
     // both cores loop on JAL-self; core-0 gate-drive envelope over the read window [base, base+dur) ⊂ [0,64).
@@ -120,7 +120,7 @@ object PulseTableSocSim extends App {
     println(s"[PulseTableSocSim] reset released; batch time advancing ($tA -> $tB)")
 
     // ── Part 1: AXI host bridge round-trip into the readout-buffer region ──
-    val robByteAddr = BigInt(dut.map.readoutBufBase) // readoutBufBase (region 3)
+    val robByteAddr = BigInt(dut.map.robBase)  // the readout-trace region
     val testWord = List(0x11, 0x22, 0x33, 0x44).map(_.toByte)
     axi.write(robByteAddr, testWord)
     hostCd.waitSampling(5)
@@ -195,7 +195,7 @@ object PulseTableSocSim extends App {
     // window — the host env RAM (demod bank, 32-bit interpolated line: re@[15:0], im@[31:16]).
     val demodEnvE = 0x7FFF                              // ~unity square envelope (real, im = 0)
     def loadDemodEnv(core: Int, a: Int, word: BigInt): Unit =
-      axi.write(BigInt(dut.map.demodEnvOffset(core)) + a.toLong * 4, leBytes(word, 4))
+      axi.write(BigInt(dut.map.envOffset(core, 2)) + a.toLong * 4, leBytes(word, 4))
     // prescaleAmp ⇒ the CORDIC runs uncorrected (×K≈1.65); with saturate=false amp must stay well below
     // full scale so Cordic(amp)·phasor·env doesn't overflow/wrap (matches PulseGeneratorSim's amp≈10000).
     val demodBase = 0; val demodAmp = 12000

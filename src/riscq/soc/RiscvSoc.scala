@@ -10,8 +10,9 @@ import spinal.lib.bus.tilelink.fabric.{Node, MasterBus}
 import spinal.lib.bus.misc.SizeMapping
 import riscq.memory.{Bram, HalfUram, Uram}
 import riscq.soc.fabric.{RiscqFiber, TileLinkCpuMemFiber, MemMapFiber}
-import riscq.soc.rf.TimeMemMap
-import riscq.soc.link.{RfLinkBridge, ReadoutResult, ReadoutResultSink, RfCmd}
+import riscq.soc.rf.{TimeMemMap, DoneMemMap}
+import riscq.soc.spec.SocSpecMap
+import riscq.soc.link.{RfLinkBridge, EventLink, EventFifoSink, ReadoutResultSink, LatestSink, MailboxSink, SinkSpec, RfCmd, HostCmd, HostWindowBridge}
 
 /**
  * The **timing-critical core unit** carved out of [[RiscqRfWithPulseTableFiber]] for the
@@ -23,6 +24,9 @@ import riscq.soc.link.{RfLinkBridge, ReadoutResult, ReadoutResultSink, RfCmd}
  * IO boundary — narrow and **registered** on both sides of the posted link:
  *   - `time`                     : shared batch-time broadcast (in);
  *   - `cmd : master Flow(RfCmd)`  : posted RF writes out of the [[RfLinkBridge]] → the DSP datapath;
+ *   - `hostCmd : master Stream(HostCmd)` : posted result writes out of the [[HostWindowBridge]] → the
+ *     clock-crossing FIFO and the shared host-window funnel (specs/software/22; the crossing itself is
+ *     in the parent, outside this hard Component);
  *   - `resultIn : slave Flow(ReadoutResult)` : the readout result back from the DSP → [[ReadoutResultSink]];
  *   - `iLoad`  (a [[MasterBus]] slave-IO, implicit dsp clock) : the program/data image load into the
  *     BRAM's slow port; the parent drives it *across* the host→dsp CDC, so this slave-IO is already in
@@ -49,7 +53,12 @@ case class RiscvSoc(
     memWidth: Int = 32,
     memOutReg: Boolean = true,
     useUram: Boolean = true,
-    rfAddrWidth: Int = 18,
+    rfAddrWidth: Int = SocSpecMap.putAddrWidth,   // the put window (specs/cross-core/02 §3.2)
+    hostWinAddrWidth: Int = 24,   // per-core host window (24 ⇒ 16 MB) at `RiscvSoc.hostWinBase`
+    // the up-link's core-local sinks (specs/universal-control/01 §2.4), from the core's EventPlan;
+    // the default is the qubit build's single readout-result sink at 0x4200 plus the cross-core inbox
+    // registers (board / release / signal mailboxes, specs/cross-core/02 §3.3).
+    sinks: Seq[SinkSpec] = RiscvSoc.defaultSinks,
     // test harness: add a second master into the CPU data-bus decode (a sim drives it directly).
     withTestTap: Boolean = false,
     // host-load master params (the BRAM slow-port image load). Must match what the parent's host fabric
@@ -62,7 +71,9 @@ case class RiscvSoc(
   // ── IO boundary ──
   val time     = in  port UInt(timeWidth bits)        // shared batch-time broadcast
   val cmd      = master port Flow(RfCmd(rfAddrWidth)) // posted RF writes (RfLinkBridge) → DSP
-  val resultIn = slave  port Flow(ReadoutResult(readoutAccWidth)) // readout result ← DSP → sink
+  val resultIn = slave  port Flow(RfCmd(EventLink.inboxAddrWidth)) // the up-link: puts into the inbox (sinks)
+  val hostCmd  = master port Stream(HostCmd(hostWinAddrWidth))    // posted result writes → host window
+  val done     = out port Bool()                     // run-completion flag (specs/software/23) → host
 
   def getPipe[T <: Data](data: T, cycles: Int): T = {
     var res = data
@@ -134,27 +145,80 @@ case class RiscvSoc(
   val memMapFiber = riscqCd(MemMapFiber(addressWidth = 22, dataWidth = 32))
   val ctrlTime    = riscqCd(getPipe(time, 1))
   val timeMemMap  = TimeMemMap(ctrlTime); memMapFiber.addMapping(timeMemMap.mapping)
+  // Completion flag (specs/software/23): the firmware's last store sets it, the host reads it in the
+  // SoC's host control block — so a completion poll never touches the RAM port that instruction fetch
+  // shares with the host image-load master. It lives in `riscqCd`, so the per-run reset is its only
+  // clear. Two `riscqCd` stages before the port keep the hard-Component IO boundary a short arc; the
+  // consumer is a `hostCd` BufferCC across an asynchronous clock group, so nothing here is timed
+  // against the 500 MHz path — the level just has to arrive within a poll interval.
+  val doneMemMap  = riscqCd(DoneMemMap()); memMapFiber.addMapping(doneMemMap.mapping)
+  done := riscqCd(RegNext(RegNext(doneMemMap.done, False), False))
 
   // ── posted-link bridge + core-local readout-result sink (riscqCd) ──
   val posted = riscqCd { new Composite(this, "posted") {
     val bridge = RfLinkBridge(rfAddrWidth)
-    bridge.up at SizeMapping(0x10000, 4 << 16) of dMemPortDec
+    // the put window at 0x10000: node · 0x10000 + offset — nodes 0..15 are this core's own channels
+    // (one 0x10000 sub-window each, universal-control/01 §2.2), nodes ≥ 16 are system units the parent
+    // routes to the hub (specs/cross-core/02 §3.2). The host window at 0x40000000 bounds it at 29 bits.
+    require(rfAddrWidth <= 29, s"rfAddrWidth $rfAddrWidth: the put window would reach the host window")
+    bridge.up at SizeMapping(0x10000, BigInt(1) << rfAddrWidth) of dMemPortDec
     bridge.up.setUpConnection(a = StreamPipe.FULL, d = StreamPipe.FULL)
 
-    val sink = ReadoutResultSink(readoutAccWidth, resAddr = 0x4200, realAddr = 0x4204, imagAddr = 0x4208)
-    sink.resultIn << resultIn                       // up-link result arrives from the DSP (parent); the
-                                                    // sink mirrors the decoder's res.valid level (no arm)
+    // write-only host window (specs/software/22): results leave the core here instead of piling up in
+    // the 16 KB I+D RAM. Unlike the RF bridge this one is a Stream — the far side (a CC FIFO, then DDR)
+    // can stall, and the bridge then withholds the AccessAck so the store back-pressures the CPU.
+    val hostWindow = HostWindowBridge(hostWinAddrWidth)
+    hostWindow.up at SizeMapping(RiscvSoc.hostWinBase, BigInt(1) << hostWinAddrWidth) of dMemPortDec
+    hostWindow.up.setUpConnection(a = StreamPipe.FULL, d = StreamPipe.FULL)
+
+    // one sink per reporting channel, by kind: the readout result keeps its latched-level contract,
+    // edge-like reports get a consume-on-read FIFO with a sequence number and the cause time.
+    val sinkAreas = sinks.map { sk =>
+      val a: Area = sk.kind match {
+        case EventLink.resultKind  => ReadoutResultSink(readoutAccWidth, sk.base)
+        case EventLink.fifoKind    => EventFifoSink(sk.dataWidth, sk.base)
+        case EventLink.latestKind  => LatestSink(sk.dataWidth / 32, sk.base)
+        case EventLink.mailboxKind => MailboxSink(sk.base)
+      }
+      a.setCompositeName(this, s"${sk.name}Sink")
+      a
+    }
+    sinkAreas.foreach {
+      case r: ReadoutResultSink => r.resultIn << resultIn
+      case f: EventFifoSink     => f.resultIn << resultIn
+      case l: LatestSink        => l.resultIn << resultIn
+      case m: MailboxSink       => m.resultIn << resultIn
+    }
   } }
 
-  cmd << posted.bridge.cmd                          // posted RF writes leave for the DSP datapath
+  cmd     << posted.bridge.cmd                      // posted RF writes leave for the DSP datapath
+  hostCmd << posted.hostWindow.cmd                  // posted result writes leave for the host funnel
 
   // finish the control block: add the local result-sink read map, then connect the bus.
-  memMapFiber.addMapping(posted.sink.mapping)        // res@0x4200 / real@0x4204 / imag@0x4208 (local)
+  posted.sinkAreas.foreach {                          // sink k at 0x4200 + 0x20·k (local reads)
+    case r: ReadoutResultSink => memMapFiber.addMapping(r.mapping)
+    case f: EventFifoSink     => memMapFiber.addMapping(f.mapping)
+    case l: LatestSink        => memMapFiber.addMapping(l.mapping)
+    case m: MailboxSink       => memMapFiber.addMapping(m.mapping)
+  }
   memMapFiber.up at SizeMapping(0, 1 << 16) of dMemPortDec
   memMapFiber.up.setUpConnection(a = StreamPipe.FULL, d = StreamPipe.FULL)
 }
 
 object RiscvSoc {
+  /** The qubit build's sinks: the demod result sink, then the cross-core inbox registers. */
+  def defaultSinks: Seq[SinkSpec] = {
+    val demod = SinkSpec("demod", EventLink.resultKind, 0, EventLink.sinkBase, EventLink.resultDataWidth(32))
+    Seq(demod,
+        SinkSpec("board", EventLink.latestKind, 1, EventLink.boardBase, 32 * SocSpecMap.groupNodes),
+        SinkSpec("release", EventLink.mailboxKind, 2, EventLink.releaseBase, 32)) ++
+      (0 until EventLink.mailboxNum).map(m => SinkSpec(s"mbox$m", EventLink.mailboxKind, 3 + m, EventLink.mailboxAddr(m), 32))
+  }
+
+  /** Base of the per-core write-only host window in the CPU's data address space. One address bit away
+   *  from everything else (ctrl `0x0`, RF `0x10000`, I+D RAM `0x80000000`). */
+  val hostWinBase = 0x40000000L
+
   /** Host image-load master (BRAM slow port). Deliberately **generous** (4-bit source, 32-bit address,
    *  256-byte size ⇒ 4-bit size field) so it is a superset of every parent's host fabric (e.g. the
    *  PulseTableSoc AXI window, which negotiates different narrower params);

@@ -78,6 +78,18 @@ object RfLink {
 
   /** Pipeline a posted stream by `depth` plain `RegNext` stages — the timing-insensitive long-haul
    *  link. `depth = 0` is identity. */
+  /**
+   * The non-local half of a core's posted stream (specs/cross-core/02 §3.2): beats whose node
+   * (`address >> 16`) is at or past `localNodes` are system puts for the board hub, not the core's own
+   * channels. The address is passed through untouched — the hub dispatches on the full `{node, offset}`.
+   */
+  def nonLocal(cmd: Flow[RfCmd], localNodes: Int): Flow[RfCmd] = {
+    val out = cloneOf(cmd)
+    out.valid   := cmd.valid && (cmd.payload.address >> 16) >= localNodes
+    out.payload := cmd.payload
+    out
+  }
+
   def pipe[T <: Data](flow: Flow[T], depth: Int): Flow[T] =
     (0 until depth).foldLeft(flow)((f, _) => f.stage())
 }

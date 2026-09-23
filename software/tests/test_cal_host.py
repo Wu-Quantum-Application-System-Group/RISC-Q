@@ -13,9 +13,17 @@ and the whole loop together in the `--slow` anchors.
 The rule (01 §2.3): every `@r.answer` here computes its populations from FIRST PRINCIPLES — the
 textbook response of the sequence the class is running. None of them import from `riscq.cal` to
 decide what to return, and none were tuned until a test passed.
+
+Ported to the universal-cal classes (specs/universal-cal): the classes, their knobs and their
+verdicts are unchanged, so every claim below is the one it was — only the ANSWERS moved to the new
+program shape (one `k_batched` per core: the on-core sweep is the runtime pair `x0`/`dx0`, a coupled
+virtual-Z ramp `x1`/`dx1`, the runtime params `r0..r3` in the class's `params()` order, and the
+Phase circuit named by the generated header instead of a `seq` fold). The old-vs-new bit-exact
+signal parity is recorded at commit 347f749.
 """
 
 import math
+import re
 from pathlib import Path
 
 import numpy as np
@@ -24,15 +32,14 @@ from scipy.special import erfc
 
 from riscq.cal import (Amplitude, Classifier, Config, Fidelity, Frequency, Phase, Punchout,
                        ReadoutCalibration, ReadoutFidelity, Resonator, Separation, T1, T2, Window)
-from riscq.cal.base import GATE_ENV, gate_sigma
-from riscq.cal.readout import _rawiq_prog, _ro_amp_prog
+from riscq.cal.base import (GATE_ENV, SEP, demod_ch, demod_table, gate_ch, gate_sigma, line,
+                            readout_tables, ro_ch)
 from riscq.pulses import Pulse, units
 from tests.responder import counts, counts_heralded, int_axis, iq_sum, q16_axis, raw_iq
 
 CONFIG = Path(__file__).resolve().parents[1] / "configs" / "sim-2q.json"
 F_GE = 50e6                      # planted qubit frequency (freq code 2048)
-Y180_X90 = 0                     # k_phase's compile-time `seq` fold: qcal's first Phase sequence
-RAW = 1                          # the kernels' `mode` fold: IQ shots out, not a classified count
+RAW = 1                          # k_batched's `mode` fold: IQ shots out, not a classified count
 
 
 def _s(n_batches, m):
@@ -102,19 +109,32 @@ def _unseat(word) -> int:
     return c - (1 << 16) if c >= (1 << 15) else c
 
 
-def _vz_phase(prog, params) -> np.ndarray:
-    """The virtual-Z phase (rad) the kernel applies at each point. The (p0, dp) pair is a plain
-    phase-code accumulator, and one phase code is π/2^15 rad — so this is the swept frame angle the
-    Ramsey / Phase circuits actually see, read off the run instead of re-derived."""
-    p0, dp = _unseat(params["p0"]), _unseat(params["dp"])
+def _vz_phase(prog, params, x0="x1", dx="dx1") -> np.ndarray:
+    """The virtual-Z phase (rad) the kernel ramps at each point, read off the run instead of
+    re-derived. The pair is a SEATED phase-code accumulator and one phase code is π/2^15 rad; it
+    rides the kernel's second axis (x1/dx1) when it is coupled to a swept wait (Ramsey), and the
+    first (x0/dx0) when the frame itself is the swept axis (Phase)."""
+    src = {**prog.bindings, **(params or {})}
     n = int(prog.bindings["npts"])
-    return (p0 + np.arange(n) * dp) * math.pi / (1 << 15)
+    return (_unseat(src[x0]) + np.arange(n) * _unseat(src[dx])) * math.pi / (1 << 15)
+
+
+def _prep(params, key="r0") -> int:
+    """This rerun's prep state — the `Cond(PREP, …)` runtime param the readout cals rerun over.
+    `r0` where PREP is the only Param, `r1` where a knob sweep runs ahead of it (Window)."""
+    return int(params[key])
+
+
+def _circuit(prog) -> str:
+    """Which Phase circuit a program carries: the experiment label names the generated header
+    (`seq_Phase_Y180_X90_core0.h`), which is what the old compile-time `seq` fold used to say."""
+    return re.search(r"seq_Phase_(\w+?)_core", prog.c_source).group(1)
 
 
 def _demod_phase(prog) -> float:
     """The demod-carrier phase this program was COMPILED at (rad) — `readout_tables` bakes it into
     the demod slot, and the measured phasor rotates with it."""
-    return prog.tables["demod"][0][0] * math.pi / (1 << 15)
+    return prog.tables["tbl_demod"][0][0] * math.pi / (1 << 15)
 
 
 def _antipodal_iq(prep, shots, theta, seed=0, a_over_sigma=RO_A_OVER_SIGMA):
@@ -146,8 +166,8 @@ def _lorentzian(f_hz, f_r, kappa, chi, state):
 
 
 def _vna_freqs(prog, params, m) -> np.ndarray:
-    """The physical frequencies of a k_vna sweep's realized codes (its (c0q, dcq) descriptor)."""
-    return units.code_to_freq(q16_axis(prog, params, x0="c0q", dx="dcq"), m.params)
+    """The physical frequencies a readout-frequency sweep realizes (the kernel's x0/dx0 pair)."""
+    return units.code_to_freq(q16_axis(prog, params, x0="x0", dx="dx0"), m.params)
 
 
 def test_amplitude_recovers_the_planted_rabi_rate(responder, socmap):
@@ -167,7 +187,7 @@ def test_amplitude_recovers_the_planted_rabi_rate(responder, socmap):
     def _(progs, params):
         out = {}
         for q, prog in progs.items():
-            xs = q16_axis(prog, params.get(q))            # the codes the kernel realizes
+            xs = q16_axis(prog, params.get(q), x0="x0", dx="dx0")            # the codes the kernel realizes
             p1 = (1 - np.cos(rabi * g * xs)) / 2          # textbook Rabi, from first principles
             out[q] = {"out": counts(p1, prog.bindings["shots"])}
         return out
@@ -193,7 +213,7 @@ def test_amplitude_rejects_a_fit_whose_pi_over_2_lies_outside_the_sweep(responde
     def _(progs, params):
         out = {}
         for q, prog in progs.items():
-            xs = q16_axis(prog, params.get(q))
+            xs = q16_axis(prog, params.get(q), x0="x0", dx="dx0")
             out[q] = {"out": counts((1 - np.cos(rabi * g * xs)) / 2, prog.bindings["shots"])}
         return out
 
@@ -214,7 +234,7 @@ def test_amplitude_proposal_is_not_applied_until_apply(responder, socmap):
 
     @r.answer
     def _(progs, params):
-        return {q: {"out": counts((1 - np.cos(rabi * g * q16_axis(prog, params.get(q)))) / 2,
+        return {q: {"out": counts((1 - np.cos(rabi * g * q16_axis(prog, params.get(q), x0="x0", dx="dx0"))) / 2,
                                   prog.bindings["shots"])} for q, prog in progs.items()}
 
     res = Amplitude(cfg, 0, n_gates=1).run(r.drv)
@@ -244,22 +264,24 @@ def test_amplitude_fine_pass_refines_the_coarse(responder, socmap):
     g = _sigma_per_code(m)
     rabi = float(4 * math.pi / (g * units.AMP_SCALE))       # ~2 Rabi periods across the sweep
 
-    @r.answer
-    def _(progs, params):
-        out = {}
-        for q, prog in progs.items():
-            xs = q16_axis(prog, params.get(q))
-            n = int(prog.bindings["ngates"])                # n gates ⇒ n× the drive integral
-            out[q] = {"out": _out((1 - np.cos(n * rabi * g * xs)) / 2, prog)}
-        return out
+    def plant(n):                                           # n gates ⇒ n× the drive integral
+        @r.answer
+        def _(progs, params):
+            out = {}
+            for q, prog in progs.items():
+                xs = q16_axis(prog, params.get(q), x0="x0", dx="dx0")
+                out[q] = {"out": _out((1 - np.cos(n * rabi * g * xs)) / 2, prog)}
+            return out
 
     true_amp = (math.pi / 2) / (rabi * g) / units.AMP_SCALE
     cfg = _cfg(m, x90_amp=0.5)
+    plant(1)
     coarse = Amplitude(cfg, 0, n_gates=1, points=13, shots=64).run(r.drv)
     assert coarse.ok
     coarse.apply()                                          # the fine pass sweeps RELATIVE to this
     applied = cfg["qubit/0/x90/amp"]
 
+    plant(4)
     fine = Amplitude(cfg, 0, n_gates=4, amp_span=(0.7, 1.3), relative_amp=True, points=9,
                      shots=64).run(r.drv)
     assert fine.ok
@@ -286,7 +308,7 @@ def test_t1_recovers_the_planted_decay(responder, socmap):
     def _(progs, params):
         out = {}
         for q, prog in progs.items():
-            delays = int_axis(prog, params.get(q), x0="d0", dx="dd")
+            delays = int_axis(prog, params.get(q), x0="x0", dx="dx0") + SEP
             out[q] = {"out": _out(np.exp(-delays / t1), prog)}
         return out
 
@@ -311,7 +333,7 @@ def test_t2_recovers_the_planted_decay(responder, socmap):
     def _(progs, params):
         out = {}
         for q, prog in progs.items():
-            waits = int_axis(prog, params.get(q), x0="w0", dx="dw")
+            waits = int_axis(prog, params.get(q), x0="x0", dx="dx0")
             p1 = 0.5 + 0.5 * np.exp(-waits / t2) * np.cos(_vz_phase(prog, params[q]))
             out[q] = {"out": _out(p1, prog)}
         return out
@@ -349,7 +371,7 @@ def test_frequency_proposal_moves_the_carrier_toward_f_ge(responder, socmap, d0_
     def _(progs, params):
         out = {}
         for q, prog in progs.items():
-            waits = int_axis(prog, params.get(q), x0="w0", dx="dw")
+            waits = int_axis(prog, params.get(q), x0="x0", dx="dx0")
             t_s = units.ns(waits, m.params) * 1e-9
             phi = _vz_phase(prog, params[q]) + 2 * math.pi * delta_hz * t_s
             p1 = 0.5 + 0.5 * np.exp(-waits / t2) * np.cos(phi)
@@ -393,7 +415,7 @@ def test_frequency_verdict_is_per_qubit(responder, socmap):
         def _(progs, params):
             out = {}
             for q, prog in progs.items():
-                waits = int_axis(prog, params.get(q), x0="w0", dx="dw")
+                waits = int_axis(prog, params.get(q), x0="x0", dx="dx0")
                 t_s = units.ns(waits, m.params) * 1e-9
                 delta_hz = units.code_to_freq(d_code[q], m.params)
                 phi = _vz_phase(prog, params[q]) + 2 * math.pi * delta_hz * t_s
@@ -432,8 +454,8 @@ def test_phase_verdict_is_per_qubit(responder, socmap):
     def _(progs, params):
         out = {}
         for q, prog in progs.items():
-            d = np.sin(_vz_phase(prog, params[q]) - stark[q])
-            p1 = 0.5 * (1 - d) if prog.bindings["seq"] == Y180_X90 else 0.5 * (1 + d)
+            d = np.sin(_vz_phase(prog, params[q], "x0", "dx0") - stark[q])
+            p1 = 0.5 * (1 - d) if _circuit(prog) == "Y180_X90" else 0.5 * (1 + d)
             out[q] = {"out": _out(p1, prog)}
         return out
 
@@ -456,7 +478,7 @@ def _antipodal_answer(a_over_sigma=RO_A_OVER_SIGMA):
     def answer(progs, params):
         out = {}
         for q, prog in progs.items():
-            z = _antipodal_iq(int(params[q]["prep"]), int(prog.bindings["shots"]),
+            z = _antipodal_iq(_prep(params[q]), int(prog.bindings["shots"]),
                               _demod_phase(prog), a_over_sigma=a_over_sigma)
             out[q] = {"out": raw_iq(z) if prog.bindings.get("mode") == RAW
                       else _out([_res_count(z) / len(z)], prog)}
@@ -464,7 +486,7 @@ def _antipodal_answer(a_over_sigma=RO_A_OVER_SIGMA):
     return answer
 
 
-def test_readout_calibration_captures_in_the_zero_demod_frame(socmap):
+def test_readout_calibration_captures_in_the_zero_demod_frame(responder, socmap):
     """spec 13 §5 — the property that MAKES the demod-phase proposal a fixed point, asserted
     where it lives: on the compiled program. The proposal is ABSOLUTE (rotate the |0>→|1> cluster
     axis onto +real), so the RAW capture must run in the ZERO demod frame — baking the config's
@@ -472,19 +494,21 @@ def test_readout_calibration_captures_in_the_zero_demod_frame(socmap):
     value and turn the 'absolute' proposal relative. Invisible on a co-sim config (stored phase 0),
     wrong on X6Y3 (−109.9°…+39.0°).
 
-    Sharper than the co-sim round trip it replaces: `_rawiq_prog`'s demod slot carries phase code 0
-    whatever `readout/0/demod/phase` holds — while a COUNTS program, which must discriminate in the
-    calibrated frame, bakes that same phase in. Both halves, one compile each."""
+    Sharper than the co-sim round trip it replaces: ReadoutCalibration's demod slot carries phase
+    code 0 whatever `readout/0/demod/phase` holds — while a COUNTS readout, which must discriminate
+    in the calibrated frame, bakes that same phase in. Both halves, one run each."""
     m = socmap
+    r = responder(CONFIG)
+    r.answer(_antipodal_answer())
     cfg = _cfg(m, x90_amp=0.495)
     for stale in (0.0, 1.0, -2.5):
         cfg["readout/0/demod/phase"] = stale
-        prog, _ = _rawiq_prog(m, cfg, 0, "X90", 8)
-        assert prog.tables["demod"][0][0] == 0, \
+        ReadoutCalibration(cfg, 0, shots=8).run(r.drv)
+        assert r.setups[-1][0].tables["tbl_demod"][0][0] == 0, \
             f"the RAW capture baked the stored demod phase {stale} into its carrier"
     cfg["readout/0/demod/phase"] = 1.0
-    prog, _ = _ro_amp_prog(m, cfg, 0, "X90", 8, 1, 0, 0)
-    assert prog.tables["demod"][0][0] == units._phase_code(1.0), \
+    ReadoutFidelity(cfg, 0, shots=8).run(r.drv)
+    assert r.setups[-1][0].tables["tbl_demod"][0][0] == units._phase_code(1.0), \
         "a COUNTS readout must discriminate in the CALIBRATED frame"
 
 
@@ -515,7 +539,7 @@ def test_readout_calibration_phase_proposal_is_a_fixed_point(responder, socmap):
 
 
 def test_readout_calibration_returns_per_prep_shots_and_a_classifier(responder, socmap):
-    """`acquire_shots` chunking (spec 09/13 §8): ReadoutCalibration issues one RAW rerun per prep
+    """The per-prep chunking (spec 09/13 §8): ReadoutCalibration issues one RAW rerun per prep
     state over ONE resident image, so each prep comes back as its own `(shots, 2)` block, and the
     trained Classifier rides on the Result for the later steps to reuse instead of retraining.
 
@@ -559,8 +583,8 @@ def test_readout_fidelity_matches_the_host_classifier(responder, socmap):
 
 
 def test_fidelity_picks_readout_amp(responder, socmap):
-    """spec 13 §5 — Fidelity sweeps qcal's knob (the readout DRIVE amplitude, on-core via k_ro_amp)
-    and scores the confusion diagonal ½[P(0|0) + P(1|1)] under the FIXED hardware discriminator,
+    """spec 13 §5 — Fidelity sweeps qcal's knob (the readout DRIVE amplitude, on-core on the
+    readout slot) and scores the confusion diagonal ½[P(0|0) + P(1|1)] under the FIXED hardware discriminator,
     never retrained per point.
 
     The answer is the linear resonator: its response is proportional to the drive and the receiver
@@ -578,10 +602,9 @@ def test_fidelity_picks_readout_amp(responder, socmap):
     def _(progs, params):
         out = {}
         for q, prog in progs.items():
-            amps = q16_axis(prog, params.get(q)) / units.AMP_SCALE
+            amps = q16_axis(prog, params.get(q), x0="x0", dx="dx0") / units.AMP_SCALE
             eps = _misassign(amps / a_cfg)               # snr = 1 at the config amplitude
-            prep = int(params[q]["prep"])
-            out[q] = {"out": _out(eps if prep == 0 else 1 - eps, prog)}
+            out[q] = {"out": _out(eps if _prep(params[q]) == 0 else 1 - eps, prog)}
         return out
 
     res = Fidelity(cfg, 0, amp_span=0.45, points=5, shots=24).run(r.drv)
@@ -612,13 +635,14 @@ def test_fidelity_sweeps_the_full_span_at_tiny_amp(responder, socmap):
 
 
 def test_window_picks_the_longer_integration(responder, socmap):
-    """The demod-window sweep — OURS, not qcal's (spec 13 §5) — retunes the window via
-    write_slot + rerun (no recompile, spec 08 §4) and is scored exactly like Fidelity: the confusion
-    diagonal under the fixed discriminator, not a classifier retrained per window.
+    """The demod-window sweep — OURS, not qcal's (spec 13 §5) — compiles ONE image at the longest
+    candidate and retunes the window per rerun (no recompile, spec 08 §4); it is scored exactly like
+    Fidelity: the confusion diagonal under the fixed discriminator, not a classifier retrained per
+    window.
 
     The answer is coherent integration against white noise: a window of w batches collects SNR ∝ √w,
-    so the longer one must win. The window is read off the slot the class actually wrote — a retune
-    that never reached the slot would leave both points identical and the test would fail."""
+    so the longer one must win. The window is read off the param the class actually wrote — a retune
+    that never reached the run would leave both points identical and the test would fail."""
     m = socmap
     r = responder(CONFIG)
     durs = (16, 64)                                     # candidate windows (batches)
@@ -628,11 +652,10 @@ def test_window_picks_the_longer_integration(responder, socmap):
     def _(progs, params):
         out = {}
         for q, prog in progs.items():
-            win = r.slot(q, "demod", 0, "dur")
-            assert win is not None, "Window did not retune the demod slot before rerunning"
+            assert "r0" in params[q], "Window did not rewrite the window param before rerunning"
+            win = int(params[q]["r0"]) >> 16             # the window this rerun retuned to (seated)
             eps = _misassign(snr_per_sqrt_batch * math.sqrt(win))
-            prep = int(params[q]["prep"])
-            out[q] = {"out": _out([eps if prep == 0 else 1 - eps], prog)}
+            out[q] = {"out": _out([eps if _prep(params[q], "r1") == 0 else 1 - eps], prog)}
         return out
 
     cfg = _cfg(m, x90_amp=0.495, dur=64, drive=80)      # the drive covers the longest window
@@ -663,10 +686,10 @@ def test_window_sweeps_each_qubit_around_its_own_timing(responder, socmap):
     def _(progs, params):
         out = {}
         for q, prog in progs.items():
-            w = r.slot(q, "demod", 0, "dur")
-            assert w is not None, f"Window did not retune core {q}'s demod slot before rerunning"
+            assert "r0" in params[q], f"Window did not rewrite core {q}'s window param"
+            w = int(params[q]["r0"]) >> 16              # this core's own window (seated batches)
             eps = _misassign(0.2 * min(w, tone[q]) / math.sqrt(w))
-            out[q] = {"out": _out([eps if int(params[q]["prep"]) == 0 else 1 - eps], prog)}
+            out[q] = {"out": _out([eps if _prep(params[q], "r1") == 0 else 1 - eps], prog)}
         return out
 
     cfg = _cfg2(m, x90_amp=0.495)
@@ -684,8 +707,8 @@ def test_window_sweeps_each_qubit_around_its_own_timing(responder, socmap):
 
 def test_window_delay_is_swept_as_a_per_core_param(responder, socmap):
     """The same dict sweep on `demod/delay`, which is NOT a table field — the kernel adds it to the
-    demod's play time — so it rides a per-run param instead of a `write_slot`, and that param has to
-    be written per CORE (spec 20 U3).
+    demod's play time — so it rides a PLAIN per-run param (the window durs are seated slot words),
+    and that param has to be written per CORE (spec 20 U3).
 
     The answer is the echo's arrival: core q's readout comes back after its own round trip τ_q, so a
     window as long as the tone collects max(0, T − |d − τ_q|) of it and the diagonal peaks exactly at
@@ -700,9 +723,9 @@ def test_window_delay_is_swept_as_a_per_core_param(responder, socmap):
     def _(progs, params):
         out = {}
         for q, prog in progs.items():
-            overlap = max(0.0, tone - abs(int(params[q]["ddly"]) - tau[q]))
+            overlap = max(0.0, tone - abs(int(params[q]["r0"]) - tau[q]))   # the delay: plain
             eps = _misassign(0.06 * overlap)
-            out[q] = {"out": _out([eps if int(params[q]["prep"]) == 0 else 1 - eps], prog)}
+            out[q] = {"out": _out([eps if _prep(params[q], "r1") == 0 else 1 - eps], prog)}
         return out
 
     cfg = _cfg2(m, x90_amp=0.495)
@@ -727,20 +750,20 @@ VNA_NOISE = 0.1                    # receiver noise, as a fraction of the on-res
 
 
 def _vna_answer(r, m, noise=VNA_NOISE, amp_slot=False):
-    """The dispersive readout's answer for a k_vna sweep: at each swept drive frequency the
+    """The dispersive readout's answer for a readout-frequency sweep: at each swept drive frequency the
     resonator responds with the Lorentzian its state pulls, and the receiver adds Gaussian noise.
-    `amp_slot` scales the response by the drive amplitude the class wrote into the `ro` slot
-    (Punchout's outer loop) — the resonator answers ITS DRIVE."""
+    `amp_slot` scales the response by the drive amplitude the class rewrote per rerun (Punchout's
+    outer loop, its only Param — so that sweep never preps) — the resonator answers ITS DRIVE."""
     f_r = units.demod_code_to_freq(2048, m.params)
     chi, kappa = (units.code_to_freq(c, m.params) for c in (CHI_CODE, KAPPA_CODE))
 
     def answer(progs, params):
         out = {}
         for q, prog in progs.items():
-            prep = int(params[q]["prep"])
-            npts, shots = (int(prog.bindings[k]) for k in ("npts", "shots"))
+            prep = 0 if amp_slot else _prep(params[q])
+            shots = int(prog.bindings["shots"])
             s = _lorentzian(_vna_freqs(prog, params.get(q), m), f_r, kappa, chi, 1 - 2 * prep)
-            gain = (r.slot(q, "ro", 0, "amp") / units.AMP_SCALE) if amp_slot else 1.0
+            gain = ((int(params[q]["r0"]) >> 16) / units.AMP_SCALE) if amp_slot else 1.0
             rng = np.random.default_rng(prep)
             z = np.repeat(gain * s, shots)
             z = z + noise * (rng.normal(0, 1, z.size) + 1j * rng.normal(0, 1, z.size))
@@ -750,7 +773,7 @@ def _vna_answer(r, m, noise=VNA_NOISE, amp_slot=False):
 
 
 def _iqsum_answer(m, noise=0.0):
-    """The same cavity for a k_vna IQSUM sweep: |0> only (spectroscopy never preps), the shots
+    """The same cavity for an IQSUM frequency sweep: |0> only (spectroscopy never preps), the shots
     summed on-core the way the kernel does."""
     f_r = units.demod_code_to_freq(2048, m.params)
     chi, kappa = (units.code_to_freq(c, m.params) for c in (CHI_CODE, KAPPA_CODE))
@@ -773,7 +796,7 @@ def test_separation_picks_max_separation_not_the_magnitude_peak(responder, socma
     response peaks at f_r + χ while the two-state separation peaks at f_r, so the |0>-magnitude
     argmax (what the old |0>-only VNA took) and the cluster-SNR argmax (qcal's statistic, what we
     take now) are DIFFERENT grid points. Separation runs the matched-pair sweep at both prep states
-    (k_vna RAW, two reruns of one resident program) and must pick the latter.
+    (RAW, two reruns of one resident program) and must pick the latter.
 
     The answer is the resonator from first principles: S(f) = 1/(1 + 2i(f − f_r ∓ χ)/κ) at
     2χ/κ ≈ 0.7, with the five swept codes landing on f_r + {−2χ, −χ, 0, +χ, +2χ}."""
@@ -819,8 +842,8 @@ def test_separation_proposes_physical_hz_not_the_alias(responder, socmap):
 
 
 def test_punchout_maps_frequency_against_drive_power(responder, socmap):
-    """The punchout map — walkthrough stage 1.2 (spec 14 F2). ONE k_vna program per qubit, then a
-    `write_slot("ro", 0, "amp")` + a |0> rerun per amplitude, so the map is (amps × points) of |S21|
+    """The punchout map — walkthrough stage 1.2 (spec 14 F2). ONE program per qubit, then a
+    drive-amplitude rewrite + a |0> rerun per amplitude, so the map is (amps × points) of |S21|
     at the |0> resonator.
 
     On a LINEAR resonator the dressed peak does NOT walk with power (real punchout needs a nonlinear
@@ -851,8 +874,8 @@ def test_punchout_maps_frequency_against_drive_power(responder, socmap):
 
 def test_resonator_scans_the_cavity_coherently(responder, socmap):
     """Resonator spectroscopy (qcal's `Resonator`, spec 20 §8) — the reference session's first cell:
-    the |0> response over an arbitrary frequency list, `shots` integrals summed ON-CORE (k_vna
-    IQSUM) so the scan is ONE run of two words per point.
+    the |0> response over an arbitrary frequency list, `shots` integrals summed ON-CORE (IQSUM)
+    so the scan is ONE run of two words per point.
 
     Same planted cavity as `Separation`'s, so the answers are known from first principles: the |0>
     magnitude peaks at the dressed resonance f_r + χ, and the reported x-axis is the caller's own
@@ -908,105 +931,13 @@ def test_resonator_scan_folds_past_the_half_rate(responder, socmap):
     assert x == pytest.approx(freqs, abs=1.5 * code)    # the ramp is integer codes: the `>> 16`
     #                        floor costs up to a code, the rounded Q16 step up to half of one more
 
-    codes = q16_axis(r.setups[-1][0], x0="c0q", dx="dcq")      # the host's unfolded ramp
+    progs, par = r.reruns[-1]                                  # the host's unfolded ramp
+    codes = q16_axis(progs[0], par[0], x0="x0", dx="dx0")
     assert codes.max() >= (1 << 15), "the scan never crossed the fold — the gate is vacuous"
     seen = ((codes + (1 << 15)) % (1 << 16)) - (1 << 15)       # what the int32 wrap leaves behind
     want = [units._freq_code(float(f), m.params) for f in x]
     assert np.all(np.abs(seen - want) <= 1), \
         f"the folded codes are not the tones' own: {seen[:3]}... vs {want[:3]}..."
-
-
-def _hanger_answer(m, dips, depth=0.6):
-    """A HANGER-coupled cavity for a k_vna IQSUM sweep: S = 1 − depth·Σ L(f), which DIPS at each
-    planted resonance instead of peaking — the notch geometry qcal's rule reads. (`_iqsum_answer`'s
-    cavity is a TRANSMISSION Lorentzian, a peak, and has no dip at all.) The scans below put ~10
-    points across κ: qcal smooths with σ = 3 SAMPLES before it gates, so a notch narrower than that
-    is washed out below its own half-depth threshold and reads as no dip at all."""
-    kappa = units.code_to_freq(KAPPA_CODE, m.params)
-
-    def answer(progs, params):
-        out = {}
-        for q, prog in progs.items():
-            shots, sh = (int(prog.bindings[k]) for k in ("shots", "sh"))
-            f = _vna_freqs(prog, params.get(q), m)
-            s = 1.0 + 0j - depth * sum(_lorentzian(f, d, kappa, 0.0, +1) for d in dips)
-            out[q] = {"out": iq_sum(IQ_SCALE * s, shots, sh)}
-        return out
-    return answer
-
-
-def test_resonator_proposes_the_notch_it_found(responder, socmap):
-    """qcal's dip rule (`Resonator.analyze`, resonator.py:527-556) and the write-back its
-    `Characterize.final` does: smooth the dB trace, keep the local minima at least halfway down from
-    the mean to the deepest point, and — when exactly ONE qualifies — propose it as
-    `readout/{q}/freq`. The planted notch sits 3κ off the tree's stored probe, so recovering it is a
-    real measurement and `apply()` has somewhere to move the Config to."""
-    m = socmap
-    r = responder(CONFIG)
-    cfg = _cfg(m)
-    f_r = float(cfg["readout/0/freq"])
-    kappa = units.code_to_freq(KAPPA_CODE, m.params)
-    dip = f_r + 3 * kappa
-    r.answer(_hanger_answer(m, [dip]))
-    freqs = f_r + np.linspace(-10 * kappa, 10 * kappa, 201)
-
-    res = Resonator(cfg, 0, freqs={0: freqs}, shots=64).run(r.drv)
-    d = res.data[0]
-    step = float(d["x"][1] - d["x"][0])
-    assert not d["fallback"], "a planted notch did not clear qcal's half-depth gate"
-    assert len(d["peaks"]) == 1, f"one resonator in band, {len(d['peaks'])} dips: {d['peaks']}"
-    assert d["notch"] == pytest.approx(dip, abs=2 * step), \
-        f"the fitted notch missed the planted resonance by {(d['notch'] - dip) / kappa:.2f} kappa"
-    assert res.ok and res.oks[0]
-    assert res.proposal == {"readout/0/freq": d["notch"]}
-    res.apply()
-    assert cfg["readout/0/freq"] == pytest.approx(dip, abs=2 * step)
-
-
-def test_resonator_refuses_a_band_holding_two_resonators(responder, socmap):
-    """Two dips in one trace is qcal's "Too many peaks" — it characterizes nothing there, and the
-    reference session's wideband 6.53 → 6.85 GHz scan (eight resonators) is exactly this case. The
-    frequency is not proposed, `apply()` refuses outright, and every qualifying dip comes back in
-    `data[q]["peaks"]` for the caller to read."""
-    m = socmap
-    r = responder(CONFIG)
-    cfg = _cfg(m)
-    f_r = float(cfg["readout/0/freq"])
-    kappa = units.code_to_freq(KAPPA_CODE, m.params)
-    dips = [f_r - 8 * kappa, f_r + 8 * kappa]
-    r.answer(_hanger_answer(m, dips))
-    freqs = f_r + np.linspace(-16 * kappa, 16 * kappa, 321)
-
-    res = Resonator(cfg, 0, freqs={0: freqs}, shots=64).run(r.drv)
-    d = res.data[0]
-    step = float(d["x"][1] - d["x"][0])
-    assert d["peaks"] == pytest.approx(dips, abs=2 * step), \
-        f"the two dips were not both found: {d['peaks']}"
-    assert math.isnan(d["notch"]) and not res.ok and not res.oks[0]
-    assert res.proposal == {}
-    with pytest.raises(RuntimeError):
-        res.apply()
-    assert cfg["readout/0/freq"] == f_r          # nothing moved
-
-
-def test_resonator_does_not_propose_a_transmission_peak(responder, socmap):
-    """The dip rule assumes a hanger notch. Our planted cavity — and `TwoLevelModel`'s, spec 17 §3
-    E6 — is a TRANSMISSION Lorentzian whose |0> response PEAKS, so nothing clears the gate: qcal
-    falls back to the raw magnitude's argmin (here a band edge) and writes it, we report the same
-    number flagged `fallback` and propose nothing (README principle 6)."""
-    m = socmap
-    r = responder(CONFIG)
-    r.answer(_iqsum_answer(m))
-    cfg = _cfg(m)
-    f_r = float(cfg["readout/0/freq"])
-    chi = units.code_to_freq(CHI_CODE, m.params)
-    freqs = f_r + np.linspace(-6 * chi, 6 * chi, 61)
-
-    res = Resonator(cfg, 0, freqs={0: freqs}, shots=64).run(r.drv)
-    d = res.data[0]
-    assert d["fallback"] and len(d["peaks"]) == 0
-    assert d["notch"] == pytest.approx(float(d["x"][int(np.argmin(d["mag"]))]))
-    assert not res.ok and not res.oks[0] and res.proposal == {}
 
 
 # ── §8 heralding: the (count, kept) decode and its denominator ──
@@ -1031,7 +962,7 @@ def test_heralding_matches_unheralded_on_clean_qubit(responder, socmap):
 
     @r.answer
     def _(progs, params):
-        return {q: {"out": _out((1 - np.cos(rabi * g * q16_axis(p, params.get(q)))) / 2, p)}
+        return {q: {"out": _out((1 - np.cos(rabi * g * q16_axis(p, params.get(q), x0="x0", dx="dx0"))) / 2, p)}
                 for q, p in progs.items()}
 
     cfg = _cfg(m)
@@ -1048,7 +979,7 @@ def test_heralding_matches_unheralded_on_clean_qubit(responder, socmap):
 
 
 def test_heralded_readout_fidelity_matches_unheralded(responder, socmap):
-    """The same herald fold in k_ro_amp (spec 13 §8): qcal's transpiler post-selects EVERY circuit,
+    """The same herald fold in the readout cals (spec 13 §8): qcal's transpiler post-selects EVERY circuit,
     the confusion circuits included. On a clean |0> qubit the heralded confusion diagonal must match
     the unheralded one — the (count, kept) decode again, this time through `_diagonal`'s two reruns.
     Exact, where the co-sim twin allowed atol=0.15 for 32-shot noise."""
@@ -1066,7 +997,7 @@ def test_heralded_readout_fidelity_matches_unheralded(responder, socmap):
 
 
 def test_heralded_phase_matches_unheralded(responder, socmap):
-    """The same herald fold in k_phase (spec 13 §8): qcal post-selects both Phase sequences, so the
+    """The same herald fold in the Phase circuits (spec 13 §8): qcal post-selects both, so the
     line crossing has to come back identical on a clean |0> qubit.
 
     The answer is the pair of sequences from first principles: both are three-X90 composites that
@@ -1081,8 +1012,8 @@ def test_heralded_phase_matches_unheralded(responder, socmap):
     def _(progs, params):
         out = {}
         for q, prog in progs.items():
-            d = np.sin(_vz_phase(prog, params[q]))          # φ* = 0: no Stark planted
-            p1 = 0.5 * (1 - d) if prog.bindings["seq"] == Y180_X90 else 0.5 * (1 + d)
+            d = np.sin(_vz_phase(prog, params[q], "x0", "dx0"))   # φ* = 0: no Stark planted
+            p1 = 0.5 * (1 - d) if _circuit(prog) == "Y180_X90" else 0.5 * (1 + d)
             out[q] = {"out": _out(p1, prog)}
         return out
 
@@ -1096,3 +1027,19 @@ def test_heralded_phase_matches_unheralded(responder, socmap):
     v_off, v_on = (x.proposal["qubit/0/x90/vz"][0] for x in (off, on))
     assert v_on == v_off
     assert v_off == pytest.approx(0.0, abs=1e-9), "an unbiased pair of lines crosses at 0"
+
+
+# ── the cal tables resolve their channels BY NAME (specs/universal-control/01 P2) ──
+
+def test_cal_tables_resolve_channels_by_name(socmap):
+    m = socmap
+    cfg = _cfg(m)
+    gate, ro, demod = (gate_ch(m), ro_ch(m), demod_ch(m))
+    assert [c.name for c in (gate, ro, demod)] == ["gate", "ro", "demod"]
+    assert [c.index for c in (gate, ro, demod)] == [0, 1, 2]   # ... which ARE 0/1/2 on this build
+
+    ro_t, demod_t, _, win, _ = readout_tables(cfg, 0, m)
+    assert (ro_t.channel, ro_t.core) == (ro.index, 0)
+    assert (demod_t.channel, demod_t.core) == (demod.index, 0)
+    assert demod_table(win, m).channel == demod.index
+    assert line(cfg, 0, "qubit", m).index == gate.index      # a gate sequence lands on `gate`

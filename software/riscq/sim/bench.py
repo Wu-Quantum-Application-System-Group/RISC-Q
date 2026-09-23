@@ -11,6 +11,7 @@ import json
 import os
 import queue
 import threading
+from collections import deque
 from pathlib import Path
 
 import cocotb
@@ -22,7 +23,7 @@ from cocotb.utils import get_sim_time
 import Pyro5.api
 import serpent
 
-from riscq.map import ADC_BATCH, BATCH_SIZE, SocMap, SocParams
+from riscq.map import ADC_BATCH, BATCH_SIZE, DIO_PIPE, SocMap, SocParams
 from riscq.sim import models
 
 CLK_PERIOD_NS = 10        # both clk and dspClk (period equality is fine in sim)
@@ -30,6 +31,11 @@ IDLE_TICK = 200           # cycles free-run per idle service-loop pass
 POLL_INTERVAL = 200       # cycles between re-reads inside poll_word
 AXI_TIMEOUT = 100_000     # cycles before an AXI handshake is declared dead (loud, not hung)
 DAC_GET_TIMEOUT = 1_000_000  # cycles dac_capture_get waits for an armed capture to finish
+
+# Modelled physical base of the PS DDR4 result buffer (specs/software/22). On hardware this is what
+# `pynq.allocate` handed back; here it is any plausible constant — the funnel adds it to
+# `(core << 24) + offset`, and read_host is buffer-relative, so the value only has to round-trip.
+HOST_BASE = 0x70000000
 
 # dspClk cycles from refTime's free-running origin (the dspRst-release cycle, captured once at sim
 # start via TimeMirror.set_origin) to the cycle whose io_dac_* sample carries batch time 0 for a
@@ -148,10 +154,15 @@ class TimeMirror:
 
 
 class DacCapture:
-    """One armed DAC capture: samples io_dac_<id>_payload on consecutive dspClk cycles."""
+    """One armed capture: samples a port on consecutive dspClk cycles — `io_dac_<id>_payload` for a
+    DAC (`pipe` = the DAC's output pipe, modelled out of the stamps) or `io_dio_<name>_out` for a
+    timed-DIO bank (`pipe` = DIO_PIPE)."""
 
-    def __init__(self, dac_id: int, n_batches: int, start_batch: int | None):
+    def __init__(self, dac_id: int, n_batches: int, start_batch: int | None,
+                 sig: str | None = None, pipe: int | None = None):
         self.dac_id = dac_id
+        self.sig = sig if sig is not None else f"io_dac_{dac_id}_payload"
+        self.pipe = pipe
         self.n_batches = n_batches
         self.start_batch = start_batch
         self.first_cycle: int | None = None
@@ -168,11 +179,12 @@ async def _capture_run(dut, m: SocMap, mirror: TimeMirror, cap: DacCapture) -> N
     time_of_cycle(first_cycle + j) - dac_pipe(dac_id) at get time, so a pulse played at t
     occupies stamps [t, t+dur) on EVERY DAC (the summed-DAC extra RegNext is modeled out)."""
     try:
-        sig = getattr(dut, f"io_dac_{cap.dac_id}_payload")
+        sig = getattr(dut, cap.sig)
+        pipe = m.dac_pipe(cap.dac_id) if cap.pipe is None else cap.pipe
         clk = dut.dspClk
         await FallingEdge(clk)
         if cap.start_batch is not None:
-            target = mirror.cycle_of_time(cap.start_batch) + m.dac_pipe(cap.dac_id)
+            target = mirror.cycle_of_time(cap.start_batch) + pipe
             delta = target - _cycle()
             if delta < 0:
                 raise RuntimeError(f"start_batch {cap.start_batch} is {-delta} cycles in the past")
@@ -226,6 +238,96 @@ async def _adc_stimulus(dut, st: "_BenchState") -> None:
             adc_sigs[aid].value = _pack_adc(lanes)
 
 
+def _int_or_zero(sig) -> int:
+    """A port value as an int, or 0 while it is still X (pre-reset)."""
+    try:
+        return int(sig.value)
+    except ValueError:
+        return 0
+
+
+async def _host_window_slave(dut, st: "_BenchState") -> None:
+    """Model of `S_AXI_HP0_FPD`: accept the host window's write-only AXI master, answer `b`, and
+    store every beat into `st.host_mem` at `addr - HOST_BASE` under its `wstrb` (specs/software/22
+    §2.2). Single-beat writes with one ID, so `aw` and `w` pair in issue order.
+
+    Timing: runs on the falling edge and *commits* that cycle's `ready` there — AXI holds `valid`
+    and its payload until the handshake, so "valid now && I drive ready now" IS the transfer at the
+    coming rising edge. It **sleeps on `aw_valid`** whenever the funnel is idle, so the per-cycle
+    python costs nothing between shots (the same reason `_adc_stimulus` free-runs in coarse chunks).
+
+    `ready` is held high rather than randomised: back-pressure on this port is signed off in
+    SpinalSim by `HostWindowFunnelSim`/`HostWindowCpuSim` (random ready stalls, golden memory), and
+    stalling here would only slow the co-sim down.
+    """
+    clk = dut.clk
+    awq: deque = deque()
+    wq: deque = deque()
+    pending_b = 0
+    dut.io_hostMem_b_payload_id.value = 0
+    dut.io_hostMem_b_payload_resp.value = 0
+    dut.io_hostMem_aw_ready.value = 1
+    dut.io_hostMem_w_ready.value = 1
+    dut.io_hostMem_b_valid.value = 0
+    while True:
+        if not (_int_or_zero(dut.io_hostMem_aw_valid) or _int_or_zero(dut.io_hostMem_w_valid)
+                or pending_b or awq or wq):
+            await RisingEdge(dut.io_hostMem_aw_valid)   # idle: wake only when a write starts
+            continue
+        await FallingEdge(clk)
+        if _int_or_zero(dut.io_hostMem_aw_valid):
+            awq.append(_int_or_zero(dut.io_hostMem_aw_payload_addr))
+        if _int_or_zero(dut.io_hostMem_w_valid):
+            wq.append((_int_or_zero(dut.io_hostMem_w_payload_data),
+                       _int_or_zero(dut.io_hostMem_w_payload_strb)))
+        while awq and wq:
+            addr = awq.popleft()
+            data, strb = wq.popleft()
+            st.host_write(addr, data, strb)
+            pending_b += 1
+        if pending_b and _int_or_zero(dut.io_hostMem_b_ready):
+            dut.io_hostMem_b_valid.value = 1
+            pending_b -= 1
+        else:
+            dut.io_hostMem_b_valid.value = 0
+
+async def _wr_loopback(dut):
+    """Self-loopback stand-in for the WR phy (with_white_rabbit builds; specs/white-rabbit 06 §4):
+    62.5 MHz clkRef/clkRx togglers, each TX word replayed to RX after a constant small queue
+    delay — bit offset 0 by construction, so `aligned` needs no dice-throw model — with
+    ready/aligned mirroring the node's resetAll. Enough for the W5 cosim smoke: bring-up,
+    self-exchange timestamps, marker; the real dice-throw/latency model is the SpinalSim
+    GtySimPhy (WrNodeSim / WrTwoNodeSim)."""
+    half_ns = 8
+    q = deque([0] * 4)
+    dut.wrPhy_clkRef.value = 0
+    dut.wrPhy_clkRx.value = 0
+    dut.wrPhy_rxDataRaw.value = 0
+    dut.wrPhy_ready.value = 0
+    dut.wrPhy_aligned.value = 0
+    dut.wrPhy_diceCount.value = 1
+    up = 0
+    while True:
+        dut.wrPhy_clkRef.value = 1
+        dut.wrPhy_clkRx.value = 1
+        await Timer(1, units="ns")               # let the TX PCS regs settle after the edge
+        q.append(int(dut.wrPhy_txDataRaw.value))
+        await Timer(half_ns - 1, units="ns")
+        dut.wrPhy_clkRef.value = 0
+        dut.wrPhy_clkRx.value = 0
+        dut.wrPhy_rxDataRaw.value = q.popleft()  # data moves on the falling edge — clean setup
+        if int(dut.wrPhy_resetAll.value) or int(dut.wrPhy_resetRxDatapath.value):
+            dut.wrPhy_ready.value = 0
+            dut.wrPhy_aligned.value = 0
+            up = 0
+        elif up < 8:
+            up += 1
+            if up == 8:                          # token bring-up delay (the dice-throw stand-in)
+                dut.wrPhy_ready.value = 1
+                dut.wrPhy_aligned.value = 1
+        await Timer(half_ns, units="ns")
+
+
 class _Req:
     __slots__ = ("op", "args", "done", "result", "error")
 
@@ -247,6 +349,7 @@ class DriverServer:
         self._m = None            # server-side SocMap, built on remote_setup (spec 08 §5)
         self._progs = {}          # core -> Program, rebuilt from the wire on remote_setup
         self.sim = self           # so riscq.run.poll_done finds `.sim.poll_word` locally
+        self.host_base = HOST_BASE  # riscq.run.setup programs this into HOSTWIN_BASE_LO/HI
 
     def _submit(self, op: str, *args):
         req = _Req(op, args)
@@ -288,11 +391,27 @@ class DriverServer:
     def dac_capture_get(self, handle):
         return self._submit("dac_get", int(handle))
 
+    def dio_capture_arm(self, name, n_batches, start_batch=None):
+        return self._submit("dio_arm", str(name), int(n_batches),
+                            None if start_batch is None else int(start_batch))
+
+    def dio_capture_get(self, handle):
+        return self._submit("dac_get", int(handle))
+
+    def dio_set(self, name, value):
+        return self._submit("dio_set", str(name), int(value))
+
     def set_model(self, spec):
         return self._submit("set_model", dict(spec))
 
     def model_state(self):
         return self._submit("model_state")
+
+    def read_host(self, offset, nbytes):
+        return self._submit("read_host", int(offset), int(nbytes))
+
+    def get_host_base(self):
+        return int(self.host_base)
 
     def get_params(self):
         return self._params
@@ -332,6 +451,19 @@ class _BenchState:
         self.captures: dict[int, DacCapture] = {}
         self._next_handle = 0
         self.model = models.ZeroModel()   # ADC seam; replaced at runtime via set_model
+        # the modelled PS DDR4 result buffer: one 16 MB slice per core (specs/software/22 §3)
+        self.host_mem = bytearray(m.hostwin_bytes_total)
+
+    def host_write(self, addr: int, data: int, strb: int) -> None:
+        """Apply one AXI beat to the modelled buffer. An address outside the buffer is a real bug
+        (a bad HOSTWIN_BASE or a runaway offset), so it is loud rather than silently dropped."""
+        off = addr - HOST_BASE
+        if not 0 <= off <= len(self.host_mem) - 4:
+            raise RuntimeError(f"host-window write to {addr:#x} outside the "
+                               f"{len(self.host_mem)} B buffer at {HOST_BASE:#x}")
+        for b in range(4):
+            if strb >> b & 1:
+                self.host_mem[off + b] = data >> (8 * b) & 0xFF
 
     def new_capture(self, cap: DacCapture) -> int:
         self._next_handle += 1
@@ -368,12 +500,29 @@ async def _handle(axi: AxiMaster, dut, st: _BenchState, op: str, args: tuple):
             raise RuntimeError(f"capture failed: {cap.error}")
         if cap.origin_cycle is None:
             raise RuntimeError("capture finished with no refTime origin (dspRst not released) — no time base")
-        t0 = (cap.first_cycle - cap.origin_cycle - SIMSTART_TO_TIME0 + cap.offset
-              - st.m.dac_pipe(cap.dac_id))
-        lane_bytes = BATCH_SIZE * 2
+        pipe = st.m.dac_pipe(cap.dac_id) if cap.pipe is None else cap.pipe
+        t0 = cap.first_cycle - cap.origin_cycle - SIMSTART_TO_TIME0 + cap.offset - pipe
+        lane_bytes = BATCH_SIZE * 2 if cap.pipe is None else 4
         data = b"".join(v.to_bytes(lane_bytes, "little") for v in cap.vals)
         del st.captures[args[0]]
         return t0, cap.n_batches, data
+    if op == "dio_arm":
+        name, n_batches, start_batch = args
+        sig = f"io_dio_{name}_out"
+        if not hasattr(dut, sig):
+            raise ValueError(f"no such DIO port: {sig}")
+        cap = DacCapture(-1, n_batches, start_batch, sig=sig, pipe=DIO_PIPE)
+        handle = st.new_capture(cap)
+        cocotb.start_soon(_capture_run(dut, st.m, st.mirror, cap))
+        return handle
+    if op == "dio_set":
+        name, value = args
+        sig = f"io_dio_{name}_in"
+        if not hasattr(dut, sig):
+            raise ValueError(f"no such DIO port: {sig}")
+        getattr(dut, sig).value = int(value) & 0xFFFF
+        await ClockCycles(dut.dspClk, 1)
+        return None
     if op == "read_block":
         addr, nbytes = args
         if nbytes % 4:
@@ -389,6 +538,12 @@ async def _handle(axi: AxiMaster, dut, st: _BenchState, op: str, args: tuple):
         for i in range(len(data) // 4):
             await axi.write_word(addr + 4 * i, int.from_bytes(data[4 * i:4 * i + 4], "little"))
         return None
+    if op == "read_host":
+        off, nbytes = args
+        if not 0 <= off <= len(st.host_mem) - nbytes:
+            raise ValueError(f"read_host [{off}, {off + nbytes}) outside the "
+                             f"{len(st.host_mem)} B host buffer")
+        return bytes(st.host_mem[off:off + nbytes])
     if op == "set_model":
         st.model = models.build_model(dict(args[0]), st.m)
         return None
@@ -426,6 +581,9 @@ async def cosim_server(dut):
         getattr(dut, f"io_axi_{sig}_valid").value = 0
     dut.io_axi_b_ready.value = 0
     dut.io_axi_r_ready.value = 0
+    dut.io_hostMem_aw_ready.value = 0
+    dut.io_hostMem_w_ready.value = 0
+    dut.io_hostMem_b_valid.value = 0
     for i in range(cfg["dac_num"]):
         getattr(dut, f"io_dac_{i}_ready").value = 1
     for i in range(cfg["adc_num"]):
@@ -435,6 +593,9 @@ async def cosim_server(dut):
     cocotb.start_soon(Clock(dut.clk, CLK_PERIOD_NS, units="ns").start())
     cocotb.start_soon(Clock(dut.dspClk, CLK_PERIOD_NS, units="ns").start())
     cocotb.start_soon(_adc_stimulus(dut, st))   # ADC seam (idle until a model is set)
+    cocotb.start_soon(_host_window_slave(dut, st))   # PS DDR4 result buffer (specs/software/22)
+    if cfg.get("with_white_rabbit", False):
+        cocotb.start_soon(_wr_loopback(dut))    # WR phy self-loopback (test_wr.py cosim smoke)
     await Timer(200, units="ns")
     dut.reset.value = 0
     dut.dspRst.value = 0

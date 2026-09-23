@@ -4,7 +4,8 @@ import spinal.core._
 import spinal.core.fiber.Fiber
 import spinal.lib._
 import riscq.riscv.RiscqParam
-import riscq.soc.link.{ReadoutResult, RfCmd}
+import riscq.soc.link.{EventLink, RfCmd}
+import riscq.soc.spec.SocSpecMap
 
 import scala.collection.mutable.ArrayBuffer
 
@@ -35,12 +36,12 @@ case class FarmRegion(
     riscqCd: ClockDomain,
     includeDummies: Boolean,
     readoutAccWidth: Int = 32,
-    rfAddrWidth: Int = 18
+    rfAddrWidth: Int = SocSpecMap.putAddrWidth
 ) extends Component {
   val anchorOut = out port Bool()
   // cores-only mode exposes each core's posted link; dummies-in-region mode keeps it internal.
   val cmd      = (!includeDummies) generate Vec.fill(perRegion)(master port Flow(RfCmd(rfAddrWidth)))
-  val resultIn = (!includeDummies) generate Vec.fill(perRegion)(slave port Flow(ReadoutResult(readoutAccWidth)))
+  val resultIn = (!includeDummies) generate Vec.fill(perRegion)(slave port Flow(RfCmd(EventLink.inboxAddrWidth)))
 
   val logic = dspCd on new Area {
     // a pipe that keeps every stage a distinct, un-optimizable FF (a placeable anchor).
@@ -68,11 +69,10 @@ case class FarmRegion(
         val acc = Reg(Bits(32 bits)) init 0
         acc.addAttribute("DONT_TOUCH")
         when(cmdDn.valid)(acc := acc ^ cmdDn.payload.data ^ cmdDn.payload.address.asBits.resize(32))
-        val res = Flow(ReadoutResult(readoutAccWidth))
+        val res = Flow(RfCmd(EventLink.inboxAddrWidth))   // the up-link: puts into the inbox
         res.valid        := cmdDn.valid && (cmdDn.payload.address === 0x30000)
-        res.payload.res  := acc(0)
-        res.payload.real := acc.asSInt.resize(readoutAccWidth)
-        res.payload.imag := acc(16, 16 bits).asSInt.resize(readoutAccWidth)
+        res.payload.address := acc(0, EventLink.inboxAddrWidth bits).asUInt
+        res.payload.data    := acc
         riscvSoc.resultIn << keepPipe(res, linkPipe)
         outs += RegNext(acc.xorR) init False
       } else {
@@ -82,6 +82,9 @@ case class FarmRegion(
         outs += RegNext(riscvSoc.cmd.valid) init False
       }
 
+      // host-window stream tied off: the bridge + its cells stay inside the core (the pblock
+      // target); the CC FIFO and the funnel live outside it and are not part of this bench.
+      riscvSoc.hostCmd.ready := True
       // iLoad tied off by a quiet host master (no program needed for timing).
       val tieILoad = Fiber build { riscvSoc.iLoad.node.bus.a.setIdle(); riscvSoc.iLoad.node.bus.d.ready := True }
     }
@@ -108,7 +111,7 @@ case class RiscqCloneTop(
     coreParam: RiscqParam = RiscqParam(gshareMem = true, csrWarl = true),
     dummiesInRegion: Boolean = false,
     readoutAccWidth: Int = 32,
-    rfAddrWidth: Int = 18
+    rfAddrWidth: Int = SocSpecMap.putAddrWidth
 ) extends Component {
   // Pure dspClk OOC top (host-load CDC moved out of RiscvSoc; iLoad is dspCd, tied off) — no host clock.
   val dspClk, dspRst = in Bool()
@@ -139,11 +142,10 @@ case class RiscqCloneTop(
           val acc = Reg(Bits(32 bits)) init 0
           acc.addAttribute("DONT_TOUCH")
           when(cmdDn.valid)(acc := acc ^ cmdDn.payload.data ^ cmdDn.payload.address.asBits.resize(32))
-          val res = Flow(ReadoutResult(readoutAccWidth))
+          val res = Flow(RfCmd(EventLink.inboxAddrWidth))   // the up-link: puts into the inbox
           res.valid        := cmdDn.valid && (cmdDn.payload.address === 0x30000)
-          res.payload.res  := acc(0)
-          res.payload.real := acc.asSInt.resize(readoutAccWidth)
-          res.payload.imag := acc(16, 16 bits).asSInt.resize(readoutAccWidth)
+          res.payload.address := acc(0, EventLink.inboxAddrWidth bits).asUInt
+          res.payload.data    := acc
           region.resultIn(j) << keepPipe(res, linkPipe)
           outs += RegNext(acc.xorR) init False
         }

@@ -1,12 +1,11 @@
-# ControlMemMaps — the per-core Time / Host control block
+# ControlMemMaps — the per-core Time / Done control block
 
 **Source:** `src/riscq/soc/rf/ControlMemMaps.scala` · **Package:** `riscq.soc.rf` · **Type:** `Area`s
-contributing to a `MemMapFiber` (`TimeMemMap`, `HostMemMap`)
+contributing to a `MemMapFiber` (`TimeMemMap`, `DoneMemMap`)
 
 The small CPU-mapped control surface every qubit core sees: the wall-clock `time`, the wait-compare the
-scheduling software spins on, and the host→CPU mailbox. These are the RF reads that are kept **core-local**
-(no link crossing), the counterpart to the readout result that does cross
-([ReadoutResultLink](ReadoutResultLink.md)). Ported from the RISC-Q reference (`riscq.soc.Misc`).
+scheduling software spins on, and the completion flag the host polls. These are the RF reads that are kept **core-local**
+(no link crossing), the counterpart to the channel reports that do cross ([EventLink](EventLink.md)). Ported from the RISC-Q reference (`riscq.soc.Misc`).
 
 ## Role in the system
 
@@ -31,10 +30,25 @@ slack are harmless because real-time precision lives in the DSP `TimedQueue` (se
 far enough ahead) absorbs the constant `D` — see [PulseParamBuffer](PulseParamBuffer.md) and
 [ARCH](ARCH.md) §5.3.
 
-## `HostMemMap` — the host mailbox
+## `DoneMemMap` — the run-completion flag
 
-- `fromHost`@0x2000 — a read returns the host-written `fromHost` word (registered for the host→dsp domain
-  crossing upstream). The control software polls it for commands from the host.
+- `done`@0x4010 — a write of bit 0 publishes "this program has finished"; a read returns it.
+
+The bit is **sticky and has no software clear**: `riscqReset` is its only clear, and that is exactly the
+run boundary, so a stale flag from the previous run cannot race the next poll and the driver never has to
+zero anything. `RiscvSoc` pipelines it out as a plain `done` port; [PulseTableSoc](PulseTableSoc.md) packs
+every core's bit into one read-only word at host-control `0x50`, which is what `riscq.run.poll_done` reads.
+
+Why a register rather than the `__rq_status` word it replaced: polling a word in the core's RAM is a Get
+on the RAM port that instruction fetch shares with the host image-load master. One register keeps
+completion off that port entirely and covers every core in a single host read — see
+[specs/software/23](../../specs/software/23-done-register.md). `__rq_status` remains, carrying RUNNING and
+the program's exit code, but the host no longer polls it.
+
+## What was here: `HostMemMap`
+
+There is no host→core mailbox in the tree — `fromHost` is not instantiated. All host→core input is D-RAM
+writes to named globals ([01 §2](../../specs/software/01-hardware-contract.md)).
 
 ## What is *not* here
 
@@ -42,24 +56,31 @@ far enough ahead) absorbs the constant `D` — see [PulseParamBuffer](PulseParam
   down the `RfCmd` stream into each [PulseParamBuffer](PulseParamBuffer.md) (`@0x4100` within the RF
   window). The control-map sim adds a local `startTime` reg only to exercise a write; production
   `startTime` rides the link.
-- **`res`/`real`/`imag`** (readout result) are served by the core-local
-  [ReadoutResultSink](ReadoutResultLink.md), fed by the up-`Flow` — not by this block.
+- **`res`/`real`/`imag`** (readout result) are served by one of the core's
+  [event sinks](EventLink.md) — the demod channel's `ReadoutResultSink`, fed by the up-`Flow` — not by
+  this block. A core's sinks sit at `0x4200 + 0x20·k`, one per reporting channel (`k` = its tag), so a
+  `dio` channel's input-edge FIFO shares the same window family.
 
 ## Verification
 
 `riscq.soc.sim.ControlMapFiberSim` drives a [MemMapFiber](MemMapFiber.md) carrying `TimeMemMap` +
-`HostMemMap` (+ a `startTime` write) over TileLink with a `MasterAgent`, and asserts: `time` reads the
-registered external time; `timeCmp` read/writes; `startTime` write-only; `fromHost` reads the mailbox; and
-`waitTimeCmp`@0x4008 **halts** until `time + 3 ≥ timeCmp` (released only once the externally-ramped time
-catches up).
+`DoneMemMap` (+ a `startTime` write) over TileLink with a `MasterAgent`, and asserts: `time` reads the
+registered external time; `timeCmp` read/writes; `startTime` write-only; `waitTimeCmp`@0x4008 **halts**
+until `time + 3 ≥ timeCmp` (released only once the externally-ramped time catches up); and `done`@0x4010
+reads 0 out of reset, is set only by a write of bit 0, and is sticky against a later write of 0.
+
+`done` clearing at the run boundary is a `riscqReset` property, so it is checked against the real reset
+network in [HostWindowCpuSim](HostWindow.md): both cores raise the host-control `DONE` word over AXI, and
+asserting `riscqReset` clears it.
 
 ```bash
 mill runMain riscq.soc.sim.ControlMapFiberSim
+mill runMain riscq.soc.sim.HostWindowCpuSim
 ```
 
 ## Related
 
 - [MemMapFiber](MemMapFiber.md) — the TileLink slave the mappings are contributed to.
-- [ReadoutResultLink](ReadoutResultLink.md) — the other (crossing) RF read path.
+- [EventLink](EventLink.md) — the other (crossing) RF read path: the up-link and its sinks.
 - [PulseParamBuffer](PulseParamBuffer.md) — where `startTime` now lives.
 - [RiscqRfWithPulseTableFiber](RiscqRfWithPulseTableFiber.md) / [PulseTableSoc](PulseTableSoc.md) — the core and the `time` source.

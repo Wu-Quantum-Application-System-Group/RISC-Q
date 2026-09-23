@@ -1048,3 +1048,200 @@ def test_twoqubit_f_cz_offset_moves_the_resonance():
         return float(md.populations()[0, 2])
     assert p02(_DCZ_CODE + off_codes) > 0.95, "no transfer at the shifted resonance"
     assert p02(_DCZ_CODE + off_codes) > p02(_DCZ_CODE) + 0.3, "resonance did not move"
+
+
+# ── CavityModel: a transmon + the M/S bosonic modes (spec 24 §4.7, universal-cal/03 V4) ──
+
+MM = SocMap(SocParams.load(Path(__file__).resolve().parents[1] / "configs" / "sim-mm.json"))
+_MM_DAC = {name: MM.channel_named(name, 0).dac for name in ("gate", "f0g1", "flux", "ro")}
+
+# The planted spectrum, in codes (converted to Hz through `units.code_to_freq`, which `_freq_code`
+# inverts exactly). Every line's rate is one π per `_CAV_N` batches at amplitude `_CAV_A`, so a
+# `_CAV_N`-batch flat-top is the planted π (a full swap) and half of it a √SWAP. The GE/EF/f0g1/MS
+# codes are multiples of 2048, so each demod's counter-rotating term integrates to exactly zero over
+# a 16-sample batch (the recovered axes are numerically exact and the asserts can be tight).
+_CAV_GE, _CAV_EF, _CAV_F0G1, _CAV_MS = 2048, 6144, 8192, 4096
+_CAV_CHI_GE, _CAV_CHI_EF = -200, -150          # the M photon's pull on the transmon (negative)
+_CAV_N, _CAV_A = 20, 10000.0
+
+
+def _cav_hz(code):
+    return units.code_to_freq(code, MM.params)
+
+
+def _cav(**kw):
+    """The planted multimode model on the sim-mm build (gate/f0g1/flux/ro on DACs 0/1/2/14)."""
+    rate = math.pi / (_CAV_N * _CAV_A)
+    return models.CavityModel(MM, core=0, f_ge=_cav_hz(_CAV_GE), f_ef=_cav_hz(_CAV_EF),
+                              rabi_ge_rad_per_amp=rate, rabi_ef_rad_per_amp=rate,
+                              f_f0g1=_cav_hz(_CAV_F0G1), f0g1_rad_per_amp=rate,
+                              f_ms=_cav_hz(_CAV_MS), ms_rad_per_amp=rate,
+                              chi_ge=_cav_hz(_CAV_CHI_GE), chi_ef=_cav_hz(_CAV_CHI_EF), **kw)
+
+
+def _cav_dac(t, **lines):
+    """The core's DAC batch at absolute batch `t`: each named line (`gate`/`f0g1`/`flux`) plays a
+    square-envelope tone `(code, amp)`, every other line is silent."""
+    z = np.zeros(BATCH_SIZE, dtype=np.int64)
+    dac = {d: z for d in _MM_DAC.values()}
+    for name, (code, amp) in lines.items():
+        k = BATCH_SIZE * t + np.arange(BATCH_SIZE)
+        dac[_MM_DAC[name]] = np.rint(amp * np.cos(math.pi * code * k / (1 << 15))).astype(np.int64)
+    return dac
+
+
+def _cav_play(md, t0, line, code, n=_CAV_N, amp=_CAV_A):
+    """Play an `n`-batch flat-top at `code` on `line` from batch `t0`; returns the next batch."""
+    for t in range(t0, t0 + n):
+        md.adc_batch(t, _cav_dac(t, **{line: (code, amp)}))
+    return t0 + n
+
+
+def _cav_prep_f(md, t0=0):
+    """GE π then EF π on the gate line: |g, 0, 0> → |f, 0, 0>."""
+    return _cav_play(md, _cav_play(md, t0, "gate", _CAV_GE), "gate", _CAV_EF)
+
+
+def _cav_prep_photon(md, t0=0):
+    """The photon prep of the multimode cals: GE π, EF π, f0g1 π ⇒ |g, 1_M, 0_S>."""
+    return _cav_play(md, _cav_prep_f(md, t0), "f0g1", _CAV_F0G1)
+
+
+def test_cavity_f0g1_swap_loads_a_photon_into_m():
+    """The sideband swap: climb the transmon to |f> (GE π then EF π on the gate line), then a
+    resonant f0g1 flat-top of the planted π length moves that excitation into ONE M photon —
+    the transmon lands back in |g>, P(M=1) ≈ 1. Half the length is a √SWAP (an equal
+    |f, 0>/|g, 1> superposition), which is what makes the length sweep a Rabi."""
+    md = _cav()
+    t = _cav_prep_f(md)
+    assert np.allclose(md.p_qubit(), [0, 0, 1], atol=1e-6), f"prep did not reach |f>: {md.p_qubit()}"
+    assert np.allclose(md.p_m(), [1, 0, 0], atol=1e-9), "the gate drive moved the cavity"
+    _cav_play(md, t, "f0g1", _CAV_F0G1)
+    assert md.p_m()[1] > 0.99, f"the π swap did not load the photon: p_M={md.p_m()}"
+    assert md.p_qubit()[0] > 0.99, f"the transmon did not return to |g>: {md.p_qubit()}"
+    assert md.p_s()[0] > 0.99, "the storage mode moved without a flux drive"
+
+    half = _cav()
+    _cav_play(half, _cav_prep_f(half), "f0g1", _CAV_F0G1, n=_CAV_N // 2)
+    assert abs(half.p_m()[1] - 0.5) < 0.02, f"half the π length is not a √SWAP: p_M={half.p_m()}"
+
+
+def test_cavity_f0g1_resonance_is_a_chevron_slice():
+    """One length-slice of the M2 chevron: sweep the f0g1 carrier around the planted f_f0g1 at the
+    π length. The transfer peaks exactly on resonance and falls off symmetrically as the
+    off-resonant Rabi law Ω²/(Ω²+Δ²)·sin²(√(Ω²+Δ²)·N/2) — Δ being the demod axis' ramp rate, the
+    detuning this model has no explicit term for — so the swept response is Lorentzian-shaped and
+    a frequency × length sweep is a chevron."""
+    omega = math.pi / _CAV_N                                   # rad/batch on resonance
+    sweep = list(range(_CAV_F0G1 - 150, _CAV_F0G1 + 151, 50))
+    p1 = []
+    for code in sweep:
+        md = _cav()
+        _cav_play(md, _cav_prep_f(md), "f0g1", code)
+        p1.append(float(md.p_m()[1]))
+    assert sweep[int(np.argmax(p1))] == _CAV_F0G1, f"peak not at f_f0g1: p_M1={np.round(p1, 3)}"
+    assert p1[len(sweep) // 2] > 0.99, f"no full swap on resonance: {p1[len(sweep) // 2]:.3f}"
+    assert p1[0] < 0.1 and p1[-1] < 0.1, f"the response did not fall off: {np.round(p1, 3)}"
+    for code, obs in zip(sweep, p1):
+        delta = (code - _CAV_F0G1) * BATCH_SIZE * math.pi / (1 << 15)      # axis ramp per batch
+        g = math.hypot(omega, delta)
+        pred = (omega ** 2 / g ** 2) * math.sin(g * _CAV_N / 2) ** 2
+        assert abs(obs - pred) < 0.02, f"code {code}: P(M=1)={obs:.4f} vs Rabi law {pred:.4f}"
+
+
+def test_cavity_photon_pulls_the_ge_resonance_by_chi():
+    """The dispersive shift (M5 / `chi()`): the transmon's GE resonance sits at f_ge + n_M·chi_ge,
+    so with a photon in M a π at the BARE f_ge is badly detuned and barely excites, while the same
+    pulse at f_ge + chi_ge is a full π. With the cavity empty the bare π is exact — the pull is
+    conditioned on the photon, which is what makes the χ measurement a difference of two Ramseys."""
+    empty = _cav()
+    _cav_play(empty, 0, "gate", _CAV_GE)
+    assert empty.p_qubit()[1] > 0.99, f"the bare GE π is not a π at n_M=0: {empty.p_qubit()}"
+
+    p_e = {}
+    for label, code in (("bare", _CAV_GE), ("pulled", _CAV_GE + _CAV_CHI_GE)):
+        md = _cav()
+        t = _cav_prep_photon(md)
+        assert md.p_m()[1] > 0.99, "photon prep failed"
+        _cav_play(md, t, "gate", code)
+        assert md.p_m()[1] > 0.99, f"the gate drive disturbed the cavity ({label})"
+        p_e[label] = float(md.p_qubit()[1])
+    assert p_e["pulled"] > 0.99, f"a π at f_ge + chi_ge must be a π with the photon: {p_e['pulled']:.4f}"
+    assert p_e["bare"] < 0.1, f"a π at the bare f_ge must miss with the photon: {p_e['bare']:.4f}"
+
+
+def test_cavity_flux_swaps_the_photon_into_storage():
+    """The beam splitter (S2): with the photon in M, a flux-line flat-top of the planted length at
+    f_MS moves it to the storage mode — |1>_M|0>_S → |0>_M|1>_S — leaving the transmon in |g>."""
+    md = _cav()
+    t = _cav_prep_photon(md)
+    assert md.p_m()[1] > 0.99 and md.p_s()[0] > 0.99, "prep did not leave the photon in M"
+    _cav_play(md, t, "flux", _CAV_MS)
+    assert md.p_s()[1] > 0.99, f"the photon did not reach storage: p_S={md.p_s()}"
+    assert md.p_m()[0] > 0.99, f"the photon did not leave M: p_M={md.p_m()}"
+    assert md.p_qubit()[0] > 0.99, f"the beam splitter moved the transmon: {md.p_qubit()}"
+
+
+def test_cavity_build_model_and_joint_state():
+    """`build_model` round-trips a JSON-serializable spec (the planted truth: f_f0g1, the swap
+    rates, f_MS, the χs), the model reads the three drive lines (plus the readout drive in collapse
+    mode, the window trigger), `ground_truth()` reports the joint state, and the readout emits
+    ThreeLevelModel's per-level phasor on the core's ADC."""
+    import json
+    rate = math.pi / (_CAV_N * _CAV_A)
+    spec = {"kind": "cavity", "core": 0, "f_ge": _cav_hz(_CAV_GE), "f_ef": _cav_hz(_CAV_EF),
+            "rabi_ge_rad_per_amp": rate, "rabi_ef_rad_per_amp": rate,
+            "f_f0g1": _cav_hz(_CAV_F0G1), "f0g1_rad_per_amp": rate,
+            "f_ms": _cav_hz(_CAV_MS), "ms_rad_per_amp": rate,
+            "chi_ge": _cav_hz(_CAV_CHI_GE), "chi_ef": _cav_hz(_CAV_CHI_EF), "init_level": 1}
+    md = models.build_model(spec, MM)
+    assert isinstance(md, models.CavityModel)
+    assert md.dac_ids() == [_MM_DAC["gate"], _MM_DAC["f0g1"], _MM_DAC["flux"]]
+    assert models.build_model({**spec, "collapse": True}, MM).dac_ids()[-1] == _MM_DAC["ro"]
+
+    gt = md.ground_truth()
+    assert json.loads(json.dumps(gt)) == gt                      # JSON-serializable ground truth
+    assert gt["p_qubit"] == [0.0, 1.0, 0.0] and gt["p_M"] == [1.0, 0.0, 0.0]   # init_level = |e>
+    assert gt["p_S"] == [1.0, 0.0]
+    assert np.array(gt["populations"]).shape == (3, 3, 2)
+    assert len(gt["psi"]) == 18                                  # the 3x3x2 state vector, [re, im]
+    assert gt["psi"][6] == [1.0, 0.0]                            # psi[|e>, 0, 0] (C order, 6/level)
+
+    # the swap chain is visible in the marginals the exact-population tests read
+    swept = models.build_model(spec, MM)
+    swept._psi[:] = 0.0
+    swept._psi[0, 0, 0] = 1.0
+    _cav_play(swept, _cav_prep_photon(swept), "flux", _CAV_MS)
+    st = swept.ground_truth()
+    assert st["p_qubit"][0] > 0.99 and st["p_M"][0] > 0.99 and st["p_S"][1] > 0.99
+
+    # readout: one tone per TRANSMON level, at the three default phases (120° apart) — the demod
+    # of a silent window, as `_readout_iq` does for the qutrit (the cavity state is invisible to it)
+    iq = []
+    for level in range(3):
+        md._psi[:] = 0.0
+        md._psi[level, 0, 0] = 1.0
+        acc = 0j
+        for t in range(24):
+            lanes = md.adc_batch(t, _cav_dac(t))[MM.adc_of(0)].astype(float)
+            k = np.arange(ADC_BATCH) + ADC_BATCH * t
+            acc += np.sum(lanes * np.exp(-1j * math.pi * md.readout_code * k / (1 << 15)))
+        iq.append(complex(acc))
+    assert min(abs(z) for z in iq) > 0.5 * max(abs(z) for z in iq)      # similar magnitude
+    for a, b in ((0, 1), (1, 2), (0, 2)):
+        sep = abs((np.angle(iq[a]) - np.angle(iq[b]) + math.pi) % (2 * math.pi) - math.pi)
+        assert sep > math.radians(90), f"levels {a},{b} readout phases too close"
+
+
+def test_cavity_idle_relax_resets_the_transmon_and_keeps_the_photon():
+    """`t1` damps the TRANSMON toward |g> on idle batches — the grid reset every batched sweep leans
+    on (ThreeLevelModel's, per (m, s) block) — while the cavity keeps its photon: this model has no
+    cavity decay, so a loaded mode survives the idle head and must be emptied by a pulse."""
+    md = _cav(t1=5.0)
+    md._psi[:] = 0.0
+    md._psi[1, 1, 0] = 1.0                                   # |e, 1_M, 0_S>
+    for t in range(60):
+        md.adc_batch(t, _cav_dac(t))                         # idle: every line silent
+    assert md.p_qubit()[0] > 0.999, f"the transmon did not relax to |g>: {md.p_qubit()}"
+    assert md.p_m()[1] > 0.999, f"the M photon decayed: p_M={md.p_m()}"
+    assert abs(float(np.sum(md.populations())) - 1.0) < 1e-12, "relaxation did not preserve the norm"

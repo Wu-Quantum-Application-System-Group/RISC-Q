@@ -4,7 +4,7 @@ import spinal.core._
 import spinal.core.fiber.Fiber
 import spinal.lib._
 import riscq.riscv.RiscqParam
-import riscq.soc.link.ReadoutResult
+import riscq.soc.link.{EventLink, RfCmd}
 
 import scala.collection.mutable.ArrayBuffer
 
@@ -80,17 +80,19 @@ case class RiscqFarmTop(
       when(cmdDn.valid)(acc := acc ^ cmdDn.payload.data ^ cmdDn.payload.address.asBits.resize(32))
 
       // drive the up-link result from the accumulator (exercises the full resultIn boundary width).
-      val res = Flow(ReadoutResult(readoutAccWidth))
+      val res = Flow(RfCmd(EventLink.inboxAddrWidth))   // the up-link: puts into the inbox
       res.valid        := cmdDn.valid && (cmdDn.payload.address === 0x30000)
-      res.payload.res  := acc(0)
-      res.payload.real := acc.asSInt.resize(readoutAccWidth)
-      res.payload.imag := acc(16, 16 bits).asSInt.resize(readoutAccWidth)
+      res.payload.address := acc(0, EventLink.inboxAddrWidth bits).asUInt
+      res.payload.data    := acc
       riscvSoc.resultIn << keepPipe(res, linkPipe)
 
       // anti-prune contribution: a 1-bit reduction of this core's accumulator, registered LOCALLY so the
       // cross-region combine carries 1 bit/core instead of a 32-bit reduction net spanning the core rows.
       outs += RegNext(acc.xorR) init False
 
+      // host-window stream tied off: the bridge + its cells stay inside the core (the pblock
+      // target); the CC FIFO and the funnel live outside it and are not part of this bench.
+      riscvSoc.hostCmd.ready := True
       // iLoad tied off by a quiet host master (no program needed for timing).
       val tieILoad = Fiber build { riscvSoc.iLoad.node.bus.a.setIdle(); riscvSoc.iLoad.node.bus.d.ready := True }
     }

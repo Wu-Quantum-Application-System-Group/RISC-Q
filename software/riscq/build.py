@@ -42,7 +42,12 @@ class Program:
     - `params`: host-writable param global -> None for user runtime params (kernels only emit
       user params now; the value is written by riscq.run.write_params).
     - `arrays`: Array param name -> element count (run() reads these back by default).
-    - `envelopes`: channel index (0 gate / 1 ro / 2 demod) -> [(line0, lines)] envelope-RAM images.
+    - `host_arrays`: the subset of `arrays` placed in the core's write-only host window
+      (specs/software/22) -> (byte offset in the window, element count). Those have NO RAM symbol;
+      `riscq.run.rerun` reads them with `Driver.read_host` instead of `read_array`.
+    - `core`: the core this specialization was compiled for — its channel geometry and header
+      (compile_kernel(core=...)); 0 for hand-written C and single-core builds.
+    - `envelopes`: channel index (in that core's channel list) -> [(line0, lines)] RAM images.
     - `tables`: live ParamTable symbol -> [(phase, amp, env, dur), ...] per-slot design-time
       codes riscq.run.load_tables fills the .data `struct rq_slot[]` with (spec 02 §3.2).
     - `c_source`: the generated C (kernels only; readable, spec principle 7).
@@ -55,10 +60,13 @@ class Program:
     Hand-written C uses `Program.from_image(img)` — everything empty, same runner."""
 
     def __init__(self, image: Image, params=None, arrays=None, envelopes=None, tables=None,
-                 c_source: str | None = None, bindings=None):
+                 c_source: str | None = None, bindings=None, host_arrays=None, core: int = 0):
         self.image = image
+        self.core = int(core)
         self.params: dict[str, int | None] = dict(params or {})
         self.arrays: dict[str, int] = dict(arrays or {})
+        self.host_arrays: dict[str, tuple[int, int]] = {n: (int(o), int(c))
+                                                        for n, (o, c) in (host_arrays or {}).items()}
         self.envelopes: dict = dict(envelopes or {})
         self.tables: dict = dict(tables or {})
         self.c_source = c_source
@@ -98,8 +106,11 @@ def _parse_nm(text: str) -> dict[str, tuple[int, int]]:
     return symbols
 
 
-def compile_c(c_source: str, soc_map: SocMap, extra_headers: dict[str, str] | None = None) -> Image:
-    """Compile a C program (its whole main.c text) against this build's fw/ runtime.
+def compile_c(c_source: str, soc_map: SocMap, extra_headers: dict[str, str] | None = None,
+              core: int = 0) -> Image:
+    """Compile a C program (its whole main.c text) against this build's fw/ runtime, for the
+    channel geometry of `core` (its generated riscq_map.h). The header text is part of the
+    build-cache key, so cores with the same channel list share one compile.
     Loud failures: missing toolchain, compile/link errors (RAM overflow is a link error),
     oversize image."""
     global CC_RUNS
@@ -112,7 +123,7 @@ def compile_c(c_source: str, soc_map: SocMap, extra_headers: dict[str, str] | No
         "start.S": (FW_DIR / "start.S").read_text(),
         "muldiv.c": (FW_DIR / "muldiv.c").read_text(),
         "riscq.h": (FW_DIR / "riscq.h").read_text(),
-        "riscq_map.h": soc_map.gen_header(),
+        "riscq_map.h": soc_map.gen_header(core),
         "link.ld": soc_map.gen_linker(),
     }
     files.update(extra_headers or {})

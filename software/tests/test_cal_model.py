@@ -107,7 +107,7 @@ def demod_cal(cosim):
     two-probe method); the readout pipeline phase depends only on RO_CODE/RO_DUR, so both tests
     reuse it."""
     drv, m = cosim
-    prog = compile_kernel(k_read, m, tables=dict(demod=demod_table(RO_DUR)),
+    prog = compile_kernel(k_read, m, tables=dict(demod=demod_table(RO_DUR, m)),
                           out=Array(3), code=pack16(RO_CODE))
     rq.setup(drv, m, {0: prog})       # the two probes differ only in the MODEL: load once (01 §4.5)
 
@@ -145,7 +145,7 @@ def test_ramsey_oscillates_at_planted_detuning(cosim, demod_cal):
     gate = ParamTable(0, F_DRIVE_HZ, {"x90": x90})
     rabi = rabi_for(m, x90, F_DRIVE_HZ, math.pi / 2)
 
-    prog = compile_kernel(k_ramsey, m, tables=dict(gate=gate, demod=demod_table(RO_DUR)),
+    prog = compile_kernel(k_ramsey, m, tables=dict(gate=gate, demod=demod_table(RO_DUR, m)),
                           out=Array(2))
     spec = dict(kind="twolevel", core=0, rabi_rad_per_amp=rabi, readout_code=RO_CODE,
                 readout_amp=RO_AMP, readout_phase=demod_cal, f_ge=f_ge_hz, t2=300)
@@ -177,7 +177,7 @@ def test_t1_exponential_decay(cosim):
     gate = ParamTable(0, F_DRIVE_HZ, {"x180": x180})
     rabi = rabi_for(m, x180, F_DRIVE_HZ, math.pi)
 
-    prog = compile_kernel(k_t1, m, tables=dict(gate=gate, demod=demod_table(RO_DUR)), out=Array(2))
+    prog = compile_kernel(k_t1, m, tables=dict(gate=gate, demod=demod_table(RO_DUR, m)), out=Array(2))
     spec = dict(kind="twolevel", core=0, rabi_rad_per_amp=rabi, readout_code=RO_CODE,
                 readout_amp=RO_AMP, readout_phase=0.0, f_ge=F_DRIVE_HZ, t1=t1)  # resonant π; phase via projection
     # delays skip 0 (a pulse abutting the window smears the flip) and stay small enough that the

@@ -25,10 +25,13 @@ PARAMS_TEXT = (CONFIGS / "sim-2q.json").read_text()
 
 
 class RamDriver:
-    """RAM-dict fake of the 4-method Driver: a word-addressed {addr: uint32} dict."""
+    """RAM-dict fake of the Driver seam: a word-addressed {addr: uint32} dict, plus a bytearray
+    standing in for the PS DDR4 host-window result buffer (specs/software/22)."""
 
     def __init__(self):
         self.mem = {}
+        self.host = bytearray(1 << 20)
+        self.host_base = 0x70000000
 
     def read32(self, addr):
         return self.mem.get(addr, 0)
@@ -46,6 +49,9 @@ class RamDriver:
         assert len(data) % 4 == 0
         for i in range(0, len(data), 4):
             self.mem[addr + i] = int.from_bytes(data[i:i + 4], "little")
+
+    def read_host(self, offset, nbytes):
+        return bytes(self.host[offset:offset + nbytes])
 
 
 @pytest.fixture
@@ -67,7 +73,7 @@ def board(tmp_path):
 
 
 def test_ops_round_trip(board):
-    """All 4 Driver ops cross the wire 1:1, including the serpent bytes-dict unwrap in BOTH
+    """All 5 Driver ops cross the wire 1:1, including the serpent bytes-dict unwrap in BOTH
     directions (client block-write payload up, server block-read bytes down)."""
     drv, _, fake, _ = board
     drv.write32(0x100, 0xDEADBEEF)
@@ -78,6 +84,16 @@ def test_ops_round_trip(board):
     drv.write_block(0x2000, blob)
     assert drv.read_block(0x2000, len(blob)) == blob
     assert isinstance(drv.read_block(0x2000, 8), bytes)
+
+
+def test_host_window_read_round_trip(board):
+    """The fifth seam op (specs/software/22 §2.6): `read_host` is buffer-relative and `host_base`
+    is the physical address `riscq.run.setup` programs into the funnel."""
+    drv, _, fake, _ = board
+    fake.host[0x1000:0x1000 + 8] = bytes(range(8))
+    assert drv.read_host(0x1000, 8) == bytes(range(8))
+    assert isinstance(drv.read_host(0x1000, 8), bytes)
+    assert drv.host_base == fake.host_base
 
 
 def test_get_params_handshake(board):
@@ -130,7 +146,9 @@ def test_remote_setup_params_guard(board):
     rejected before anything touches the driver; a matching client passes (empty progmap
     parks every core in the fake RAM — run.setup really ran server-side)."""
     drv, _, fake, _ = board
-    other = dataclasses.replace(SocParams.from_json(PARAMS_TEXT), qubit_num=14)
+    mine = SocParams.from_json(PARAMS_TEXT)
+    cores14 = tuple(dataclasses.replace(c, name=f"q{i}") for i, c in enumerate(mine.cores * 7))
+    other = dataclasses.replace(mine, cores=cores14)             # a 14-core build, not this one
     with pytest.raises(Exception, match="wrong bundle"):
         drv.remote.setup(other.to_json(), {})
     assert fake.mem == {}                              # rejected before any driver op

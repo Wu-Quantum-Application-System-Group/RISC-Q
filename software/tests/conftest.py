@@ -147,3 +147,33 @@ def cosim_2q1c(request):
     m = SocMap(SocParams.from_json(drv.sim.get_params()))
     yield drv, m
     server.stop(drv)
+
+
+@pytest.fixture(scope="session")
+def cosim_mm(request):
+    """A running verilator co-sim of the sim-mm build (universal-control/01 P3): core 0 has five
+    channels (gate / f0g1 / flux / ro / demod), core 1 the plain three: (CosimDriver, SocMap)."""
+    if not request.config.getoption("--cosim"):
+        pytest.skip("needs --cosim")
+    from riscq.map import SocMap, SocParams
+    from riscq.sim import server
+
+    drv = server.start(CONFIGS / "sim-mm.json", SW_ROOT / "build" / "sim-mm")
+    m = SocMap(SocParams.from_json(drv.sim.get_params()))
+    yield drv, m
+    server.stop(drv)
+
+
+@pytest.fixture(scope="session")
+def cosim_dio(request):
+    """A running verilator co-sim of the sim-dio build (universal-control/01 P5): core 0 carries a
+    timed-DIO bank `ttl` next to gate / ro / demod: (CosimDriver, SocMap)."""
+    if not request.config.getoption("--cosim"):
+        pytest.skip("needs --cosim")
+    from riscq.map import SocMap, SocParams
+    from riscq.sim import server
+
+    drv = server.start(CONFIGS / "sim-dio.json", SW_ROOT / "build" / "sim-dio")
+    m = SocMap(SocParams.from_json(drv.sim.get_params()))
+    yield drv, m
+    server.stop(drv)

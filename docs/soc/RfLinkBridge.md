@@ -19,8 +19,10 @@ demuxes the stream, [PulseParamBuffer](PulseParamBuffer.md) consumes it at the f
 
 It lives next to the core (inside `RiscvSoc`; see [RiscqRfWithPulseTableFiber](RiscqRfWithPulseTableFiber.md)),
 which re-exports the bridge's `cmd` stream so the parent can apply the `linkPipe` stages and route it.
-The RF window is the `0x40000`-byte subtree (gate drive / readout drive / demod; the fourth quarter is
-reserved — the carrier-triggered decoder has no CPU registers); the bridge's `rfAddrWidth` is 18 there.
+The window is the core's **put window** (`rfAddrWidth = 28`): `node · 0x10000 + offset`, where nodes
+`0..15` are the core's own channels (gate drive / readout drive / demod on the qubit builds) and nodes
+`≥ 16` are system units the parent hands to the board hub ([RfLink.nonLocal](RfLink.md)). The bridge does
+not interpret the node — it acks and forwards every word store the same way.
 
 ## Why a local ack is correct — the lead-time contract
 
@@ -44,7 +46,7 @@ one-way register chain) — [ARCH](ARCH.md) §4.
 
 - **Write-only.** `up.m2s.supported` advertises only single-word (size-4) `PutFull`/`PutPartial` and
   `s2m.none()`, so the fabric **never routes a Get/read here**. RF reads return on the separate up-`Flow`
-  ([ReadoutResultLink](ReadoutResultLink.md)); control-block reads are core-local ([ControlMemMaps](ControlMemMaps.md)).
+  ([EventLink](EventLink.md)); control-block reads are core-local ([ControlMemMaps](ControlMemMaps.md)).
 - **One ordered posted beat per accepted Put.** `cmd.valid := bus.a.fire`, with `address` rebased to the
   RF window and the 32-bit `data` passed through. A single path is a shift register, so **order is
   preserved** — all the per-generator write sequencing needs (write `startTime`, then the table entry,
@@ -60,14 +62,15 @@ Ack is 1 cycle (`bus.d << rsp.stage()`). The posted path adds `linkPipe` plain `
 
 ## Configuration
 
-`RfLinkBridge(rfAddrWidth)` — the byte-address width of the RF window (and of the `RfCmd.address` field).
-That is the only knob; the data width is fixed at 32.
+`RfLinkBridge(rfAddrWidth)` — the byte-address width of the put window (and of the `RfCmd.address`
+field), `SocSpecMap.putAddrWidth` in every build. That is the only knob; the data width is fixed at 32.
 
 ## Verification
 
 `riscq.soc.sim.RfLinkBridgeSim` drives the bridge's TileLink slave with a `MasterAgent` issuing an
-interleaved stream of word stores across two sub-windows and asserts: every accepted `Put` emerges as
-exactly one `Flow(RfCmd)` beat **in order** with the right `{address, data}`; the demux routes each beat to
+interleaved stream of word stores across two sub-windows plus one system put (node `0x21`) and asserts:
+every accepted `Put` emerges as exactly one `Flow(RfCmd)` beat **in order** with the right
+`{address, data}`; the system put leaves on `RfLink.nonLocal` untouched and on no channel; the demux routes each beat to
 the correct rebased sub-window; and **every store completes** (`putFullData` blocks on the D ack, so a
 missing ack would hang — proving the local ack keeps up at one store per request).
 
@@ -79,6 +82,6 @@ mill runMain riscq.soc.sim.RfLinkBridgeSim
 
 - [RfLink](RfLink.md) — the `RfCmd` bundle, the `linkPipe` pipe, and the address demux.
 - [PulseParamBuffer](PulseParamBuffer.md) — the far-end consumer of the demuxed stream.
-- [ReadoutResultLink](ReadoutResultLink.md) — the up-`Flow` that carries readout reads back.
+- [EventLink](EventLink.md) — the up-`Flow` that carries the channels' reports back.
 - [ARCH](ARCH.md) — the posted-link architecture and the lead-time enabler.
 - [RiscqRfWithPulseTableFiber](RiscqRfWithPulseTableFiber.md) — the qubit core that instantiates it.

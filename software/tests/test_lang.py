@@ -280,3 +280,52 @@ def test_spec_rabi_kernel_compiles(m):
     ]
     assert prog.tables["ro"] == [(0, units._amp_code(0.3), 0, 24)]  # probe: square(24), 1 spl
     assert set(prog.envelopes) == {0, 1}   # gate + ro channel indices
+
+
+# ── 10. channels by name, per core (specs/universal-control/01 P2) ──
+
+def test_param_table_from_channel_info_compiles_the_same(m):
+    @kernel
+    def k(gate: ParamTable):
+        init_pulse_params(gate.pulses)  # noqa: F821
+        play(gate, gate["x90"], now() + LEAD)  # noqa: F821
+
+    pulses = {"x90": Pulse(envelopes.square(16), amp=0.5)}
+    by_index = compile_kernel(k, m, tables=dict(gate=ParamTable(0, 50e6, pulses)))
+    by_name = compile_kernel(k, m, tables=dict(gate=ParamTable(m.channel_named("gate"), 50e6,
+                                                               pulses)))
+    assert by_name.c_source == by_index.c_source and "RF_CH0" in by_name.c_source
+    assert by_name.image.data == by_index.image.data
+    assert (by_name.core, by_index.core) == (0, 0)
+
+
+def _hetero_map() -> SocMap:
+    """A build whose two cores have DIFFERENT channel lists (tests/test_spec.py::_hetero)."""
+    from riscq.spec import ChannelSpec, CoreSpec, SocSpec
+    q = CoreSpec("q0", (ChannelSpec("gate", "pulse", 8, 1024, 4, dac=0),
+                        ChannelSpec("ro", "pulse", 1, 1024, 16, dac=8, trace=True),
+                        ChannelSpec("demod", "demod", 1, 1024, 4, adc=12)))
+    p = CoreSpec("loader", (ChannelSpec("aom", "pulse", 8, 1024, 4, dac=3),), role="process")
+    return SocMap(SocSpec("hetero", (q, p), 5e8))
+
+
+def test_compile_for_another_core_uses_that_cores_channels():
+    hm = _hetero_map()
+
+    @kernel
+    def k(aom: ParamTable):
+        init_pulse_params(aom.pulses)  # noqa: F821
+        play(aom, aom["sq"], now() + LEAD)  # noqa: F821
+
+    table = ParamTable(hm.channel_named("aom", 1), 20e6,
+                       {"sq": Pulse(envelopes.square(16), amp=0.5)})
+    prog = compile_kernel(k, hm, tables=dict(aom=table), core=1)
+    assert prog.core == 1
+    header = hm.gen_header(1)
+    assert "#define RQ_CH_AOM 0x10000" in header and "RQ_GATE" not in header
+
+    # core 0's gate ChannelInfo is not this core's channel — fail loud, never silently retarget
+    wrong = ParamTable(hm.channel_named("gate", 0), 20e6,
+                       {"sq": Pulse(envelopes.square(16), amp=0.5)})
+    with pytest.raises(ValueError, match="resolved on core 0"):
+        compile_kernel(k, hm, tables=dict(aom=wrong), core=1)

@@ -81,7 +81,7 @@ def _capture_one(drv, m):
     rq.load_tables(drv, m, 0, prog)
     handle = drv.sim.dac_capture_arm(m.gate_dac(0), _N_CAPTURE)
     rq.reset(drv, m, on=False)
-    rq.poll_done(drv, m, 0, prog, timeout=1_000_000)
+    rq.poll_done(drv, m, [0], timeout=1_000_000)
     t_fire = int(rq.read_array(drv, m, 0, prog, "out")[0])
     rq.reset(drv, m, on=True)
     t0, cap = drv.sim.dac_capture_get(handle)
@@ -100,7 +100,7 @@ def _window_present(m, t_fire, t0, cap):
     return bool(cap[idx:idx + dur].any()) and np.array_equal(cap[idx:idx + dur], gold)
 
 
-@pytest.mark.batch_cap(42_000)
+@pytest.mark.batch_cap(44_000)   # 42.3k measured in the full tier after the put up-link (a settled result is 3 puts)
 def test_drive_survives_prior_multipulse_batch(cosim):
     """FLOOR: ~40 k = FIVE core-0 program images (3 × `k_one` + 2 × `k_burst`, ~6.6 k each over AXI)
     plus the drained burst's own ~3.6 k wait. The claim is about queue state carried ACROSS run

@@ -9,6 +9,7 @@ import spinal.lib.bus.tilelink.fabric.MasterBus
 import spinal.lib.bus.tilelink.sim.{IdAllocator, IdCallback, MasterAgent}
 import spinal.lib.bus.misc.SizeMapping
 import riscq.soc.link.{RfCmd, RfLinkBridge, RfLink}
+import riscq.soc.spec.SocSpecMap
 
 import scala.collection.mutable.ArrayBuffer
 
@@ -25,7 +26,8 @@ import scala.collection.mutable.ArrayBuffer
  * Run with `./.metals/mill runMain riscq.soc.sim.RfLinkBridgeSim`.
  */
 object RfLinkBridgeSim extends App {
-  val rfAddrWidth = 18                 // 0x40000-byte RF window (gate / readout / demod / decoder)
+  val rfAddrWidth = SocSpecMap.putAddrWidth   // the put window: nodes 0..15 = own channels, ≥ 16 = system
+  val hubNode     = 0x21               // a system node (≥ SocSpecMap.localNodes): routed to nonLocal
   val gateBase    = 0x00000
   val roBase      = 0x10000
   val winSize     = 0x10000
@@ -45,6 +47,7 @@ object RfLinkBridgeSim extends App {
     val cmd  = master port cloneOf(bridge.cmd);          cmd  << bridge.cmd
     val gate = master port Flow(RfCmd(16)); gate << RfLink.demux(bridge.cmd, gateBase, winSize, 16)
     val ro   = master port Flow(RfCmd(16)); ro   << RfLink.demux(bridge.cmd, roBase,   winSize, 16)
+    val sys  = master port cloneOf(bridge.cmd);          sys  << RfLink.nonLocal(bridge.cmd, SocSpecMap.localNodes)
   }
 
   def w16(v: BigInt): Int = (((v & 0xFFFF) << 16) & 0xFFFFFFFFL).toInt
@@ -60,6 +63,7 @@ object RfLinkBridgeSim extends App {
     (roBase   + 0x0004, w16(2000)),      // readout freq
     (roBase   + 0x0000, 0),              // readout fire
     (gateBase + 0x0020, w16(77)),        // gate table[1].phase
+    ((hubNode << 16) + 0x0004, 0x00000003), // a system put (barrier arrive, count 3) → nonLocal only
     (gateBase + 0x0000, 1)               // gate fire (outId 1)
   )
 
@@ -72,7 +76,9 @@ object RfLinkBridgeSim extends App {
     val cmdBeats  = ArrayBuffer[(BigInt, BigInt)]()
     val gateBeats = ArrayBuffer[(BigInt, BigInt)]()
     val roBeats   = ArrayBuffer[(BigInt, BigInt)]()
+    val sysBeats  = ArrayBuffer[(BigInt, BigInt)]()
     cd.onSamplings {
+      if (dut.sys.valid.toBoolean)  sysBeats  += ((dut.sys.payload.address.toBigInt,  dut.sys.payload.data.toBigInt))
       if (dut.cmd.valid.toBoolean)  cmdBeats  += ((dut.cmd.payload.address.toBigInt,  dut.cmd.payload.data.toBigInt))
       if (dut.gate.valid.toBoolean) gateBeats += ((dut.gate.payload.address.toBigInt, dut.gate.payload.data.toBigInt))
       if (dut.ro.valid.toBoolean)   roBeats   += ((dut.ro.payload.address.toBigInt,   dut.ro.payload.data.toBigInt))
@@ -100,11 +106,15 @@ object RfLinkBridgeSim extends App {
     assert(gateBeats == expectedGate, s"gate demux mismatch:\n  got  $gateBeats\n  want $expectedGate")
     assert(roBeats == expectedRo,     s"readout demux mismatch:\n  got  $roBeats\n  want $expectedRo")
 
-    // every demuxed beat is accounted for by exactly one window (no leaks, no duplicates).
-    assert(gateBeats.size + roBeats.size == cmdBeats.size, "demux dropped or duplicated a beat")
+    // ── the system put leaves on nonLocal, untouched, and never on a channel window ──
+    val expectedSys = issued.filter(_._1 >= (SocSpecMap.localNodes << 16)).map { case (a, d) => (BigInt(a), BigInt(d) & 0xFFFFFFFFL) }
+    assert(sysBeats == expectedSys, s"nonLocal mismatch:\n  got  $sysBeats\n  want $expectedSys")
+
+    // every beat is accounted for by exactly one output (no leaks, no duplicates).
+    assert(gateBeats.size + roBeats.size + sysBeats.size == cmdBeats.size, "routing dropped or duplicated a beat")
 
     println(s"[RfLinkBridgeSim] PASS  rfAddrWidth=$rfAddrWidth: ${issued.size} TL stores → ${cmdBeats.size} ordered " +
-      s"RfCmd beats (gate ${gateBeats.size}, readout ${roBeats.size}); all acked locally (no stall).")
+      s"RfCmd beats (gate ${gateBeats.size}, readout ${roBeats.size}, system ${sysBeats.size}); all acked locally (no stall).")
     simSuccess()
   }
 }

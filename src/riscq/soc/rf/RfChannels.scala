@@ -34,7 +34,7 @@ case class PulseDriveChannel(
     useAligned: Boolean = false   // false = per-parameter lead-time TimedQueues (PulseGenerator);
                                   // true = QubiC-style single combined params FIFO + SRL alignment
                                   // (PulseGeneratorAligned). Bit-identical pulse; trades alignment HW.
-) extends Component {
+) extends Component with Channel {
   val N = batchSize; val w = dataWidth
   val io = new Bundle {
     val cmd       = slave  port Flow(RfCmd(rfAddrWidth))
@@ -42,6 +42,8 @@ case class PulseDriveChannel(
     val memPort   = master port MemReadPort(Bits(N * 2 * w bits), envAddrWidth)
     val pulse     = master port Flow(ComplexBatch(N, w))
   }
+  def cmd = io.cmd; def timeBcast = io.timeBcast; def memPort = Some(io.memPort)
+  def envLanes = N; def dacOut = Some(io.pulse); def carrier = None
 
   val buf = PulseParamBuffer(PulseParamBufferParams(
     pulseNum = pulseNum, dataWidth = w, envAddrWidth = envAddrWidth, durWidth = durWidth,
@@ -135,7 +137,7 @@ case class DemodChannel(
     phasorMethod: SinCosMethod,
     queueDepth: Int = 4,          // per-parameter TimedQueue depth (scheduled-ahead pulses per param)
     rfAddrWidth: Int = 16
-) extends Component {
+) extends Component with Channel {
   val N = batchSize; val w = dataWidth
   val io = new Bundle {
     val cmd       = slave  port Flow(RfCmd(rfAddrWidth))
@@ -143,6 +145,8 @@ case class DemodChannel(
     val memPort   = master port MemReadPort(Bits(N * 2 * w bits), envAddrWidth)
     val carrier   = master port Flow(ComplexBatch(N, w))
   }
+  def cmd = io.cmd; def timeBcast = io.timeBcast; def memPort = Some(io.memPort)
+  def envLanes = N; def dacOut = None; def carrier = Some(io.carrier)
 
   val buf = PulseParamBuffer(PulseParamBufferParams(
     pulseNum = pulseNum, dataWidth = w, envAddrWidth = envAddrWidth, durWidth = durWidth,

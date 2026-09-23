@@ -286,7 +286,7 @@ def test_amplitude_staircase_no_recompile(cosim):
         # sized capture (01 §3.3): boot + preamble (~500 batches) then n steps of LEAD + dur + gap
         handle = drv.sim.dac_capture_arm(m.gate_dac(0), 1000 + n * (LEAD + dur + gap))
         rq.reset(drv, m, on=False)
-        rq.poll_done(drv, m, 0, prog, timeout=1_000_000)
+        rq.poll_done(drv, m, [0], timeout=1_000_000)
         ts = [int(t) for t in rq.read_array(drv, m, 0, prog, "ts")[:n]]
         rq.reset(drv, m, on=True)
         t0, cap = drv.sim.dac_capture_get(handle)
@@ -355,8 +355,7 @@ def test_specialization_and_build_cache(cosim, tmp_path, monkeypatch):
     h0 = drv.sim.dac_capture_arm(m.gate_dac(0), 2400)
     h1 = drv.sim.dac_capture_arm(m.gate_dac(1), 2400)
     rq.reset(drv, m, on=False)
-    rq.poll_done(drv, m, 0, p0, timeout=1_000_000)
-    rq.poll_done(drv, m, 1, p1, timeout=1_000_000)
+    rq.poll_done(drv, m, [0, 1], timeout=1_000_000)
     rq.reset(drv, m, on=True)
     _, cap0 = drv.sim.dac_capture_get(h0)
     _, cap1 = drv.sim.dac_capture_get(h1)
@@ -418,7 +417,7 @@ def test_retune_slot_amp_no_recompile(cosim):
         rq.park_core(drv, m, 1)
         handle = drv.sim.dac_capture_arm(m.gate_dac(0), 2400)
         rq.reset(drv, m, on=False)
-        rq.poll_done(drv, m, 0, prog, timeout=1_000_000)
+        rq.poll_done(drv, m, [0], timeout=1_000_000)
         t_fire = int(rq.read_array(drv, m, 0, prog, "ts")[0])
         rq.reset(drv, m, on=True)
         t0, cap = drv.sim.dac_capture_get(handle)
@@ -469,7 +468,7 @@ def test_data_driven_slots_circuit(cosim):
     rq.park_core(drv, m, 1)
     handle = drv.sim.dac_capture_arm(m.gate_dac(0), 3600)
     rq.reset(drv, m, on=False)
-    rq.poll_done(drv, m, 0, prog, timeout=1_000_000)
+    rq.poll_done(drv, m, [0], timeout=1_000_000)
     ts = [int(t) for t in rq.read_array(drv, m, 0, prog, "ts")[:n]]
     rq.reset(drv, m, on=True)
     t0, cap = drv.sim.dac_capture_get(handle)

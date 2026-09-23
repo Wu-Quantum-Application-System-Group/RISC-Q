@@ -58,6 +58,24 @@ class _SimExtras:
         samples = np.frombuffer(_to_bytes(data), dtype="<i2").reshape(int(n), 16).copy()
         return int(t0), samples
 
+    def dio_capture_arm(self, name: str, n_batches: int, start_batch: int | None = None) -> int:
+        """ARM a timed-DIO capture of the board port `io_dio_<name>_out` (`<core>_<channel>`), like
+        dac_capture_arm; the stamps have DIO_PIPE modelled out, so an entry scheduled at batch t
+        shows its edge at stamp t. Returns a handle for dio_capture_get."""
+        return self._proxy.dio_capture_arm(str(name), int(n_batches),
+                                           None if start_batch is None else int(start_batch))
+
+    def dio_capture_get(self, handle: int) -> tuple[int, np.ndarray]:
+        """Fetch a finished DIO capture: (t0, levels) with levels uint16 per batch, row j = t0 + j."""
+        t0, n, data = self._proxy.dio_capture_get(int(handle))
+        levels = np.frombuffer(_to_bytes(data), dtype="<u4").reshape(int(n)).astype(np.uint16)
+        return int(t0), levels
+
+    def dio_set(self, name: str, value: int) -> None:
+        """Drive the 16 input lines of the timed-DIO bank `io_dio_<name>_in` (applied on the next
+        dspClk edge; the bank samples them and posts an edge event with that batch's time)."""
+        self._proxy.dio_set(str(name), int(value))
+
     def set_model(self, spec: dict) -> None:
         """Select/replace the ADC-loop QuantumModel at runtime (spec 05 §3). `spec` is a
         JSON-serializable dict the sim process constructs, e.g. {"kind": "zero"},
@@ -119,6 +137,7 @@ class CosimDriver:
         self.remote = None   # opt-in server-side batch runner (enable_remote); OFF by default so
         #                      the run layer keeps its per-op path and existing tests are unchanged
         self._proc = None  # set by riscq.sim.server.start()
+        self._host_base = None   # modelled PS DDR4 buffer base, fetched lazily (specs/software/22)
 
     def read32(self, addr: int) -> int:
         return self._proxy.read32(int(addr))
@@ -131,6 +150,18 @@ class CosimDriver:
 
     def write_block(self, addr: int, data: bytes) -> None:
         self._proxy.write_block(int(addr), bytes(data))
+
+    def read_host(self, offset: int, nbytes: int) -> bytes:
+        """Read the modelled PS DDR4 result buffer at buffer-relative `offset` (spec 22 §2.6)."""
+        return _to_bytes(self._proxy.read_host(int(offset), int(nbytes)))
+
+    @property
+    def host_base(self) -> int:
+        """Physical base the bench models for the host result buffer — what `riscq.run.setup`
+        programs into `HOSTWIN_BASE_LO/HI`."""
+        if self._host_base is None:
+            self._host_base = int(self._proxy.get_host_base())
+        return self._host_base
 
     def enable_remote(self) -> "CosimDriver":
         """Route setup/rerun through the server-side runner (spec 08 §5): one RPC per batch

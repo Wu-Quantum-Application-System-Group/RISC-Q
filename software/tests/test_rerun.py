@@ -13,8 +13,9 @@ pytestmark = pytest.mark.cosim
 
 
 class CountingDriver:
-    """Wraps a Driver, tallying the 4 seam ops; forwards `.sim`/`.remote` unchanged so poll_done
-    still amortizes server-side (spec 08 B3)."""
+    """Wraps a Driver, tallying the 5 seam ops; forwards `.sim`/`.remote` unchanged so poll_done
+    still amortizes server-side (spec 08 B3). A host-window array read counts as ONE op, like the
+    block read it replaces (specs/software/22 §2.6)."""
 
     def __init__(self, drv):
         self._drv = drv
@@ -35,6 +36,10 @@ class CountingDriver:
     def write_block(self, addr, data):
         self.ops += 1
         return self._drv.write_block(addr, data)
+
+    def read_host(self, offset, nbytes):
+        self.ops += 1
+        return self._drv.read_host(offset, nbytes)
 
     def __getattr__(self, name):
         return getattr(self._drv, name)
@@ -82,7 +87,7 @@ def test_rerun_op_budget(cosim):
     rq.rerun(cd, m, {0: prog}, params={0: {"offset": 10, "n": 4}},
              arrays={0: {"xs": [1, 2, 3, 4]}})
     print(f"\n[budget] one rerun = {cd.ops} seam ops")
-    assert cd.ops <= 12, f"rerun cost {cd.ops} seam ops (expected ~10)"
+    assert cd.ops <= 12, f"rerun cost {cd.ops} seam ops (expected ~9)"
 
 
 @pytest.mark.batch_cap(22_000)

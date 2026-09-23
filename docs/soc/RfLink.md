@@ -50,9 +50,22 @@ def demux(cmd: Flow[RfCmd], base: BigInt, size: BigInt, outWidth: Int): Flow[RfC
 Routes the bridge's single ordered stream to one channel's address window: the output is valid only when
 the address falls in `[base, base+size)`, and is **rebased** to that window (the low `outWidth` bits). It
 is **pure combinational routing — no arbiter, no collision**, because a `Flow` has no back-pressure and the
-far-side channels are independent (each only reacts to addresses in its own window). The per-core fiber
-demuxes the `0x40000` RF window into four `0x10000` sub-windows: gate drive `@0x0`, readout drive
-`@0x10000`, demod carrier `@0x20000`, readout decoder `@0x30000`.
+far-side channels are independent (each only reacts to addresses in its own window). The per-core fiber demuxes the RF
+window into one `0x10000` sub-window per entry of the core's channel list — channel `k` at `k·0x10000`
+([SocSpec](SocSpec.md)). On the qubit builds that is gate drive `@0x0`, readout drive `@0x10000`, demod
+carrier `@0x20000`, with `@0x30000` unmapped (the decoder has no CPU-facing registers).
+
+## `RfLink.nonLocal` — the system half of the stream
+
+```scala
+def nonLocal(cmd: Flow[RfCmd], localNodes: Int): Flow[RfCmd]
+```
+
+The complement of the channel demuxes: valid for beats whose node (`address >> 16`) is `≥ localNodes`
+(`SocSpecMap.localNodes = 16`), i.e. every put that is not for one of the core's own channels. The
+address is passed through whole — the board hub dispatches on `{node, offset}`
+([specs/cross-core/02](../../specs/cross-core/02-put-network.md) §4). Not yet consumed by any top (R0 of
+that spec); `RfLinkBridgeSim` checks the routing.
 
 ## Latency / timing
 
@@ -74,5 +87,5 @@ mill runMain riscq.soc.sim.ReadoutResultLinkSim
 
 - [RfLinkBridge](RfLinkBridge.md) — produces the `RfCmd` stream and acks the CPU locally.
 - [PulseParamBuffer](PulseParamBuffer.md) / [RfChannels](RfChannels.md) — the demuxed consumers.
-- [ReadoutResultLink](ReadoutResultLink.md) — the matching up-`Flow`, piped the same way.
+- [EventLink](EventLink.md) — the matching up-`Flow`, piped the same way.
 - [ARCH](ARCH.md) — why the link is narrow, one-way, and posted.

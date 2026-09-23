@@ -60,6 +60,13 @@ if {$RUN_IMPL} {
     set_property STEPS.PLACE_DESIGN.ARGS.DIRECTIVE $::env(RISCQ_PLACE_DIRECTIVE) [get_runs impl_1]
     puts "\[run\] place directive override: $::env(RISCQ_PLACE_DIRECTIVE)"
   }
+  # RISCQ_PHYSOPT_DIRECTIVE overrides the directive of BOTH phys_opt passes (post-place and post-route),
+  # e.g. AggressiveExplore to chase the last tens of ps on a design that already places cleanly.
+  if {[info exists ::env(RISCQ_PHYSOPT_DIRECTIVE)]} {
+    set_property STEPS.PHYS_OPT_DESIGN.ARGS.DIRECTIVE $::env(RISCQ_PHYSOPT_DIRECTIVE) [get_runs impl_1]
+    set_property STEPS.POST_ROUTE_PHYS_OPT_DESIGN.ARGS.DIRECTIVE $::env(RISCQ_PHYSOPT_DIRECTIVE) [get_runs impl_1]
+    puts "\[run\] phys_opt directive override: $::env(RISCQ_PHYSOPT_DIRECTIVE)"
+  }
   # RISCQ_PBLOCK hooks a pre-place Tcl (pblocks.tcl) that creates 14 per-core Pblocks pinning ONLY
   # each RISC-V core + its RAM (riscqFiber_riscq + mem) to a clock region, the DSP/RF datapath left
   # to float — the fix for the X5-edge congestion wall that placer-directive experiments

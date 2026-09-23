@@ -11,15 +11,15 @@ import spinal.lib.bus.misc.SizeMapping
 import riscq.dsp._
 import riscq.dsp.pulse._
 import riscq.soc.fabric.MemMapFiber
-import riscq.soc.link.{ReadoutResultLink, ReadoutResultSink, RfLink}
+import riscq.soc.link.{EventLink, ReadoutResultSink, RfLink, SinkSpec}
 
 import scala.math.{cos, sin}
 
 /**
  * Sign-off for the readout-result up-path: a real carrier-triggered [[ReadoutDecoder]] integrates a
- * tone over two scheduled carrier-`Flow` windows; its `res.valid` is forwarded **as a level** on the
- * upstream posted `Flow` ([[ReadoutResultLink.source]]), **pipelined** by `linkPipe` stages, and
- * mirrored by a core-side [[ReadoutResultSink]]. The CPU (a `MasterAgent`) reads
+ * tone over two scheduled carrier-`Flow` windows; its `res.valid` level is carried as settled/cleared
+ * beats on the upstream posted `Flow(Event)` ([[EventLink.resultSource]] + [[EventLink.merge]]),
+ * **pipelined** by `linkPipe` stages, and rebuilt by a core-side [[ReadoutResultSink]]. The CPU (a `MasterAgent`) reads
  * `res`@4 / `real`@8 / `imag`@12 from the sink's **local** map — the `res` read HALTS locally until the
  * integral settles — and the values are checked bit-exact vs the windowed-demod golden.
  *
@@ -61,7 +61,7 @@ object ReadoutResultLinkSim extends App {
   val rA = (90, 6); val rB = (200, 5); val totalCycles = 360
 
   case class Dut(linkPipe: Int) extends Component {
-    val tlBus = new MasterBus(tilelink.M2sParameters(addressWidth = 8, dataWidth = 32,
+    val tlBus = new MasterBus(tilelink.M2sParameters(addressWidth = 16, dataWidth = 32,
       masters = List(tilelink.M2sAgent(name = this, mapping = List(tilelink.M2sSource(
         id = SizeMapping(0, 4), emits = tilelink.M2sTransfers(
           get = tilelink.SizeRange.upTo(0x40), putFull = tilelink.SizeRange.upTo(0x40),
@@ -76,13 +76,14 @@ object ReadoutResultLinkSim extends App {
     rd.io.carrier << carrierIn
 
     // ── res.valid forwarded UP (as a level) through the link into the level-mirror sink ──
-    val upSrc = ReadoutResultLink.source(rd.io.res.valid, rd.io.res.payload, rd.io.real, rd.io.imag, accWidth)
-    val sink  = ReadoutResultSink(accWidth, resAddr = 4, realAddr = 8, imagAddr = 12)
+    val spec  = SinkSpec("res", EventLink.resultKind, 0, EventLink.sinkBase, EventLink.resultDataWidth(accWidth))
+    val upSrc = EventLink.merge(Seq(EventLink.resultSource(rd.io.res.valid, rd.io.res.payload, rd.io.real, rd.io.imag, accWidth)), Seq(spec))
+    val sink  = ReadoutResultSink(accWidth, base = spec.base)
     sink.resultIn << RfLink.pipe(upSrc, linkPipe)
     sink.valid.simPublic()
 
     // ── core-side local read map for res/real/imag ──
-    val sinkMap = MemMapFiber(addressWidth = 8, dataWidth = 32)
+    val sinkMap = MemMapFiber(addressWidth = 16, dataWidth = 32)
     sinkMap.addMapping(sink.mapping)
     sinkMap.up at 0 of tlBus.node
 
@@ -124,8 +125,8 @@ object ReadoutResultLinkSim extends App {
       }
 
       def readTriplet(): (Boolean, BigInt, BigInt) = {
-        val resWord = agent.getInt(0, 4)                 // HALTS locally until the integral has settled
-        ((resWord & 1) != 0, signedAcc(agent.getInt(0, 8)), signedAcc(agent.getInt(0, 12)))
+        val resWord = agent.getInt(0, 0x4200)                 // HALTS locally until the integral has settled
+        ((resWord & 1) != 0, signedAcc(agent.getInt(0, 0x4204)), signedAcc(agent.getInt(0, 0x4208)))
       }
 
       // ── read #1: issued BEFORE the first window settles ⇒ the res read halts until A settles ⇒ A ──

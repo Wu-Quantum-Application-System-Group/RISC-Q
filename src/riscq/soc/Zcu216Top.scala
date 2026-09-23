@@ -3,7 +3,8 @@ package riscq.soc
 import spinal.core._
 import spinal.lib._
 import spinal.lib.bus.amba4.axi._
-import riscq.misc.{Axi4VivadoHelper, Axi4StreamVivadoHelper, VivadoClkHelper}
+import riscq.misc.{Axi4VivadoHelper, Axi4WriteOnlyVivadoHelper, Axi4StreamVivadoHelper, VivadoClkHelper}
+import riscq.soc.link.HostWindowFunnel
 
 /**
  * SoC toplevel scaffolding for the RFSoC (ZCU216-class) part — the agentic counterpart of the RISC-Q
@@ -13,44 +14,6 @@ import riscq.misc.{Axi4VivadoHelper, Axi4StreamVivadoHelper, VivadoClkHelper}
  */
 
 /**
- * Host-AXI address map, **derived** from the per-window sizes rather than the reference's scattered
- * literals. One equal region per window-class; per-core sub-windows are `coreStride` apart. CPU-visible
- * (per-core `dBus`) offsets live in [[RiscqRfWithPulseTableFiber]]; this is only the host-AXI side, which
- * can be laid out freely.
- */
-case class SocMemoryMap(
-    qubitNum: Int,
-    coreMemBytes: Int,        // bytes of instruction RAM visible per core
-    pulseMemBytes: Int,       // bytes of gate-drive pulse-envelope RAM visible per core
-    readoutEnvBytes: Int,     // bytes of readout-drive (interpolated) envelope RAM visible per core
-    demodEnvBytes: Int,       // bytes of demod-carrier (interpolated) envelope RAM visible per core
-    readoutBufBytes: Int      // bytes of readout buffers visible per core
-) {
-  private def pow2ceil(x: Int): Int = 1 << log2Up(x)
-  val coreStride       = pow2ceil(coreMemBytes)
-  val pulseStride      = pow2ceil(pulseMemBytes)
-  val readoutEnvStride = pow2ceil(readoutEnvBytes)
-  val demodEnvStride   = pow2ceil(demodEnvBytes)
-  val readoutStride    = pow2ceil(readoutBufBytes)
-
-  // six equal top-level regions; each holds qubitNum strided sub-windows.
-  val regionSize = pow2ceil(Seq(coreStride, pulseStride, readoutEnvStride, demodEnvStride, readoutStride).max * qubitNum)
-
-  val coreMemBase    = 0
-  val pulseMemBase   = 1 * regionSize
-  val readoutEnvBase = 2 * regionSize
-  val demodEnvBase   = 3 * regionSize
-  val readoutBufBase = 4 * regionSize
-  val hostCtrlBase   = 5 * regionSize
-
-  def coreMemOffset(core: Int)    = coreMemBase + core * coreStride
-  def pulseMemOffset(core: Int)   = pulseMemBase + core * pulseStride
-  def readoutEnvOffset(core: Int) = readoutEnvBase + core * readoutEnvStride
-  def demodEnvOffset(core: Int)   = demodEnvBase + core * demodEnvStride
-  def readoutBufOffset(core: Int) = readoutBufBase + core * readoutStride
-}
-
-/**
  * External SoC ports. When `vivado` is set the AXI / AXI-Stream ports carry the Vivado
  * `X_INTERFACE_INFO` attributes (interface names `S_AXIS` / `DAC{i}_AXIS` / `ADC{i}_AXIS`) the IP packager
  * needs to bundle them into bus interfaces; on the default they are plain scalar ports, as the
@@ -58,11 +21,18 @@ case class SocMemoryMap(
  */
 case class RiscqZcu216SocPorts(
     dacNum: Int = 16, adcNum: Int = 16, dacBatch: Int = 16, adcBatch: Int = 16, dataWidth: Int = 16,
-    vivado: Boolean = false
+    vivado: Boolean = false, dio: Seq[String] = Nil
 ) extends Bundle {
+  // timed digital I/O banks (universal-control/01 P5), one `<core>_<channel>` pair per dio channel:
+  // 16 outputs placed at cycle precision, 16 inputs whose edges post timestamped events
+  val dioOut: Seq[Bits] = dio.map(n => out(Bits(16 bits)).setPartialName(s"dio_${n}_out"))
+  val dioIn:  Seq[Bits] = dio.map(n => in(Bits(16 bits)).setPartialName(s"dio_${n}_in"))
   val dspClk = in Bool ()
   val dspRst = in Bool ()
   val axi    = slave(Axi4(Axi4Config(addressWidth = 32, dataWidth = 32, idWidth = 2)))
+  // per-core result writes into the PS DDR4 (specs/software/22): a write-only, single-beat 32-bit master
+  // with the PS's 40-bit physical address. Wired to `S_AXI_HP0_FPD` in the block design.
+  val hostMem = master(Axi4WriteOnly(HostWindowFunnel.axiConfig(40)))
   val dac    = List.fill(dacNum)(master port Stream(Bits(dacBatch * dataWidth bits)))
   val adc    = List.fill(adcNum)(slave port Stream(Bits(adcBatch * dataWidth bits)))
 
@@ -72,6 +42,7 @@ case class RiscqZcu216SocPorts(
 
   if (vivado) {
     Axi4VivadoHelper.addInference(axi, "S_AXIS")
+    Axi4WriteOnlyVivadoHelper.addInference(hostMem, "M_AXI_HOST")
     dac.zipWithIndex.foreach { case (d, id) => Axi4StreamVivadoHelper.addStreamInference(d, s"DAC${id}_AXIS") }
     adc.zipWithIndex.foreach { case (a, id) => Axi4StreamVivadoHelper.addStreamInference(a, s"ADC${id}_AXIS") }
   }
@@ -83,9 +54,9 @@ case class RiscqZcu216SocPorts(
  */
 abstract class Zcu216Top(
     dacNum: Int = 16, adcNum: Int = 16, dacBatch: Int = 16, adcBatch: Int = 16, dataWidth: Int = 16,
-    vivado: Boolean = false
+    vivado: Boolean = false, dio: Seq[String] = Nil
 ) extends Component {
-  val io = RiscqZcu216SocPorts(dacNum, adcNum, dacBatch, adcBatch, dataWidth, vivado)
+  val io = RiscqZcu216SocPorts(dacNum, adcNum, dacBatch, adcBatch, dataWidth, vivado, dio)
 
   val hostCd = ClockDomain.current
   io.dspClk.setName("dspClk")

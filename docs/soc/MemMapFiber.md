@@ -13,7 +13,7 @@ bus. Ported from the RISC-Q reference (`riscq.soc.Misc`).
 
 - **`MemMapFiber`** — register block whose mappings are contributed *incrementally* via `addMapping`.
   The control block uses this so each piece ([ControlMemMaps](ControlMemMaps.md)' `TimeMemMap`,
-  `HostMemMap`, and the [`ReadoutResultSink`](ReadoutResultLink.md) read map) registers its own
+  `HostMemMap`, and the [`ReadoutResultSink`](EventLink.md) read map) registers its own
   offsets onto one shared slave.
 - **`MemMapDriverFiber`** — register block whose single `driveProc` builds the whole map at once. Used
   for the host AXI control registers (`riscqReset`, `fromHost`, the 64-bit `timeOffset`).
@@ -69,5 +69,5 @@ mill runMain riscq.soc.sim.PulseTableSocSim
 
 ## Related
 
-[ControlMemMaps](ControlMemMaps.md) · [ReadoutResultLink](ReadoutResultLink.md) ·
+[ControlMemMaps](ControlMemMaps.md) · [EventLink](EventLink.md) ·
 [RiscvSoc](RiscvSoc.md) · [SOC_TIPS](SOC_TIPS.md)

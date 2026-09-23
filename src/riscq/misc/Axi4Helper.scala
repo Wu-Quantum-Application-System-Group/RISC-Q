@@ -2,7 +2,7 @@ package riscq.misc
 
 import spinal.core._
 import spinal.lib._
-import spinal.lib.bus.amba4.axi.Axi4
+import spinal.lib.bus.amba4.axi.{Axi4, Axi4WriteOnly}
 
 /**
  * `X_INTERFACE_INFO` taggers for AXI4 / AXI4-Stream ports, ported from the RISC-Q reference
@@ -45,5 +45,27 @@ object Axi4VivadoHelper {
     tag(axi.r.valid, "RVALID"); tag(axi.r.ready, "RREADY")
     tag(axi.r.data, "RDATA"); Option(axi.r.id).foreach(tag(_, "RID"))
     tag(axi.r.resp, "RRESP"); tag(axi.r.last, "RLAST")
+  }
+}
+
+object Axi4WriteOnlyVivadoHelper {
+  /** Write-only twin of [[Axi4VivadoHelper.addInference]] for an [[Axi4WriteOnly]] master (the host
+   *  window's `M_AXI_HOST` port). Only the write channels exist, and the optional AW fields the config
+   *  drops (`region`/`lock`/`qos`) are `null` — so tag defensively. */
+  def addInference(axi: Axi4WriteOnly, ifcName: String = "M_AXI"): Unit = {
+    def tag(d: Data, sig: String): Unit =
+      if (d != null) d.addAttribute("X_INTERFACE_INFO", "xilinx.com:interface:aximm:1.0 " + ifcName + " " + sig)
+
+    tag(axi.aw.valid, "AWVALID"); tag(axi.aw.ready, "AWREADY")
+    tag(axi.aw.addr, "AWADDR"); tag(axi.aw.id, "AWID")
+    tag(axi.aw.region, "AWREGION"); tag(axi.aw.len, "AWLEN"); tag(axi.aw.size, "AWSIZE")
+    tag(axi.aw.burst, "AWBURST"); tag(axi.aw.lock, "AWLOCK"); tag(axi.aw.cache, "AWCACHE")
+    tag(axi.aw.qos, "AWQOS"); tag(axi.aw.prot, "AWPROT")
+
+    tag(axi.w.valid, "WVALID"); tag(axi.w.ready, "WREADY")
+    tag(axi.w.data, "WDATA"); tag(axi.w.strb, "WSTRB"); tag(axi.w.last, "WLAST")
+
+    tag(axi.b.valid, "BVALID"); tag(axi.b.ready, "BREADY")
+    tag(axi.b.id, "BID"); tag(axi.b.resp, "BRESP")
   }
 }

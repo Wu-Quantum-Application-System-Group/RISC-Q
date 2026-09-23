@@ -118,4 +118,59 @@ static inline int32_t read_imag(void) { return (int32_t)RQ_MMIO(RQ_CTRL_IMAG); }
 
 static inline uint32_t from_host(void) { return RQ_MMIO(RQ_CTRL_FROM_HOST); }
 
+/* ── timed digital I/O (a `dio` channel, universal-control/01 P5) ──
+ * The same register file as a pulse channel: slot = {mask (the phase word), value (the amp word),
+ * dur}; fire/play/set_start/init_pulse_params drive it unchanged. At the scheduled batch the bank
+ * takes (out & ~mask) | (value & mask). Shortest hold of an entry followed by another: 2 batches. */
+static inline void dio_slot(uint32_t ch, uint32_t slot, uint32_t mask, uint32_t value, uint32_t dur) {
+    set_phase(ch, slot, (int32_t)(mask << 16));
+    set_amp(ch, slot, (int32_t)(value << 16));
+    set_env(ch, slot, 0);
+    set_dur(ch, slot, dur << 16);
+}
+
+/* ── event sinks (universal-control/01 §2.4): the core's reporting channels each own a sink at
+ * RQ_SINK_<NAME>. A `result` sink (the demod) is read_res/read_real/read_imag. A `fifo` sink (dio
+ * input edges, …): pop_event HALTS until an event is queued, returns its first data word and
+ * consumes it; the popped event's other words, cause time and sequence number stay readable until
+ * the next pop; event_count is the queue occupancy (non-halting). A gap in event_seq means the
+ * queue overflowed. */
+/* ── the put network (specs/cross-core/02 §8.1): every op is one or two memory accesses ──
+ * A store to RQ_NODE_ADDR(node) + offset is a posted put the board hub dispatches by node:
+ *   publish(g, slot, bit)  sets bit `slot` of shared word g on every core's board[g] (the compiler
+ *                          assigns the slot per group member);
+ *   barrier(id, count)     arrives at barrier `id` (count = the member count), then HALTS on the release
+ *                          mailbox and returns the released time t0 — identical on every member;
+ *                          schedule from it: play(ch, slot, t0 + RQ_LEAD). Rendezvous only: every
+ *                          member arrives and waits;
+ *   remote(g, slot)        the last bit published to slot `slot` of group g — read it right after the
+ *                          barrier that ordered it (fresh by publish-then-barrier ordering);
+ *   signal(core, m, x)     a unicast put into `core`'s mailbox m; wait_signal(m) HALTS until it lands
+ *                          and consumes it. One sender per mailbox: the address says who. */
+#define RQ_NODE_ADDR(node)      (RQ_RF_WINDOW + ((uint32_t)(node) << 16))
+#define RQ_INBOX_OFF(cpu_addr)  ((cpu_addr) - RQ_SINK_BASE)
+static inline void publish(uint32_t g, uint32_t slot, uint32_t bit) {
+    RQ_MMIO(RQ_NODE_ADDR(RQ_GROUP_NODE0 + g)) = (slot << 1) | (bit & 1);
+}
+static inline uint32_t remote(uint32_t g, uint32_t slot) {
+    return (RQ_MMIO(RQ_INBOX_BOARD + 4 * g) >> slot) & 1;
+}
+static inline uint32_t barrier(uint32_t id, uint32_t count) {
+    RQ_MMIO(RQ_NODE_ADDR(RQ_BARRIER_NODE0 + id)) = count;
+    return RQ_MMIO(RQ_INBOX_RELEASE);                        /* HALTS until released; returns t0 */
+}
+#define RQ_INBOX_NODE(board, core) (((uint32_t)(board) << 8) | (RQ_INBOX_NODE0 + (core)))
+static inline void signal(uint32_t node, uint32_t m, uint32_t x) {   /* node = RQ_INBOX_NODE(board, core) */
+    RQ_MMIO(RQ_NODE_ADDR(node) + RQ_INBOX_OFF(RQ_INBOX_MAILBOX0 + m * RQ_SINK_STRIDE)) = x;
+}
+static inline uint32_t wait_signal(uint32_t m) {
+    return RQ_MMIO(RQ_INBOX_MAILBOX0 + m * RQ_SINK_STRIDE); /* HALTS until a signal lands; consumes */
+}
+
+static inline uint32_t pop_event(uint32_t sink)          { return RQ_MMIO(sink + 0x00); }  /* HALTS */
+static inline uint32_t event_word(uint32_t sink, uint32_t k) { return RQ_MMIO(sink + 4 * k); }
+static inline uint32_t event_time(uint32_t sink)         { return RQ_MMIO(sink + 0x10); }
+static inline uint32_t event_seq(uint32_t sink)          { return RQ_MMIO(sink + 0x14); }
+static inline uint32_t event_count(uint32_t sink)        { return RQ_MMIO(sink + 0x18); }
+
 #endif

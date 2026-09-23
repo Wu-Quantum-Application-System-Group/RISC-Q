@@ -63,3 +63,28 @@ connect_bd_net      [get_bd_pins $CLKIFC/hostClk]                [get_bd_pins $A
 assign_bd_address -offset 0x80000000 -range 0x10000000 \
   -target_address_space [get_bd_addr_spaces zynq_ps/Data] [get_bd_addr_segs $TOP/S_AXIS/reg0] -force
 assign_bd_address
+
+# ---- Host window: per-core results -> PS DDR4 over S_AXI_HP0_FPD (specs/software/22 §2.5) ----
+# HP0 owns a DDRC port of its own (HP1/HP2 share one); the width is pinned to 32 so IP Integrator
+# inserts no width converter, and the port is a DIRECT connection, not through the SmartConnect.
+set_property -dict [list CONFIG.PSU__USE__S_AXI_GP2 {1} CONFIG.PSU__SAXIGP2__DATA_WIDTH {32}] $ZYNQ_PS
+connect_bd_intf_net [get_bd_intf_pins $TOP/M_AXI_HOST] [get_bd_intf_pins zynq_ps/S_AXI_HP0_FPD]
+connect_bd_net      [get_bd_pins $CLKIFC/hostClk]      [get_bd_pins zynq_ps/saxihp0_fpd_aclk]
+assign_bd_address -target_address_space [get_bd_addr_spaces $TOP/M_AXI_HOST] \
+  [get_bd_addr_segs zynq_ps/SAXIGP2/HP0_DDR_LOW] -force
+assign_bd_address -target_address_space [get_bd_addr_spaces $TOP/M_AXI_HOST] \
+  [get_bd_addr_segs zynq_ps/SAXIGP2/HP0_DDR_HIGH] -force
+
+# ---- White Rabbit GTY pins (with_white_rabbit builds only — the IP then has wr* pins): the GT
+# refclk + serial lanes go straight out as BD ports; constraints-wr.xdc places them (SFP0/X0Y4).
+# wrMarker (the digital marker pin) stays unconnected — the marker rides a spare DAC instead. ----
+if {[llength [get_bd_pins -quiet $TOP/wrRefClkP]]} {
+  foreach p {wrRefClkP wrRefClkN wrRxP wrRxN} {
+    create_bd_port -dir I $p
+    connect_bd_net [get_bd_ports $p] [get_bd_pins $TOP/$p]
+  }
+  foreach p {wrTxP wrTxN} {
+    create_bd_port -dir O $p
+    connect_bd_net [get_bd_ports $p] [get_bd_pins $TOP/$p]
+  }
+}

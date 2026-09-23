@@ -43,7 +43,7 @@ Lives at the converter edge in the SoC's DSP region. Its inputs:
 
 Its outputs: `io.real`/`io.imag` (the raw integrated I/Q, read back by software as one word
 each), `io.res` (`Flow(Bool)`, valid once the integral settles, cleared by the next window's
-start — see [ReadoutResultLink](../soc/ReadoutResultLink.md)), and `io.demodData`
+start — see [EventLink](../soc/EventLink.md)), and `io.demodData`
 (`Flow(ComplexBatch)`, the raw per-batch demod trace, valid/payload self-aligned).
 
 ## Pipeline
@@ -105,7 +105,7 @@ results).
 `res.valid` rises one cycle after the last in-window product settles into `sumR`/`sumI` (the
 falling-edge detect registers), and is cleared by the **next window's** rising edge — so it is high
 from a window's settle until the next window opens, i.e. **low exactly while a fresh window
-integrates**. [ReadoutResultLink.source](../soc/ReadoutResultLink.md) forwards this level up to the
+integrates**. [EventLink.resultSource](../soc/EventLink.md) forwards this level up to the
 core-local sink (which the CPU's halting `res` read polls). `io.res.payload = sumR.msb` — `sign(sumR)`, a fixed threshold of 0
 on the real axis (`true` ⇒ negative). The raw `real`/`imag` are exposed so software applies its
 own IQ rotation/threshold off-line. A programmable IQ-rotation discriminator remains a future
@@ -172,7 +172,7 @@ payload. Runs for `saturate` false and true.
 - [ComplexMul](ComplexMul.md), [AdderTree](AdderTree.md) — the reused datapath blocks.
 - [DSP48](DSP48.md) — DSP48E2 packing notes; [DSP](DSP.md) — number formats.
 - [SoC ARCH](../soc/ARCH.md) §2 — why lead-time scheduling makes the result link
-  distance-tolerant; [ReadoutResultLink](../soc/ReadoutResultLink.md) — how `res`/`real`/`imag`
+  distance-tolerant; [EventLink](../soc/EventLink.md) — how `res`/`real`/`imag`
   return to the core.
 - [specs/new-readout-decoder](../../specs/new-readout-decoder/README.md) — the rewrite spec
   (rationale, software contract, migration).

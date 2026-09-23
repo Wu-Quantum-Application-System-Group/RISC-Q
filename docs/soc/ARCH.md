@@ -6,9 +6,9 @@ unidirectional, posted, pipelined link**, so the cores can be floorplanned **far
 converter edge**. That frees the converter edge for the resource-hungry [`PulseGenerator`](../dsp/PulseGenerator.md)s
 and breaks the timing wall you hit when 14 cores and 14 DSP datapaths fight for the same clock regions.
 
-The toplevel that assembles this is [`PulseTableSoc`](PulseTableSoc.md); each qubit is a
-[`RiscqRfWithPulseTableFiber`](RiscqRfWithPulseTableFiber.md); the board wrapper is
-[`Zcu216Top`](Zcu216Top.md).
+The toplevel that assembles this is [`PulseTableSoc`](PulseTableSoc.md); each core is a
+[`RiscqRfWithPulseTableFiber`](RiscqRfWithPulseTableFiber.md) built from its **channel list**
+([`SocSpec`](SocSpec.md)); the board wrapper is [`Zcu216Top`](Zcu216Top.md).
 
 ---
 
@@ -45,13 +45,13 @@ the property the whole architecture rests on.
 
 ## What crosses the gap
 
-Three pipelined, unidirectional, timing-insensitive `Flow`s cross between a core and its DSP, per qubit:
+Three pipelined, unidirectional, timing-insensitive `Flow`s cross between a core and its DSP, per core:
 
 | Bundle | Dir | Contents | Pipelinable because |
 |---|---|---|---|
 | **time** | down | the 32-bit batch-time counter, broadcast to all buffers with equal delay | continuous; lead-time absorbs constant delay |
 | **`RfCmd`** | down | `{address, data}` — one posted RF register write (table / `freq` / `startTime` / fire) | posted, no ack, single ordered path |
-| **`ReadoutResult`** | up | `{res, real, imag}` on integration done | posted, polled locally; no round-trip |
+| **put** (`RfCmd`) | up | `{offset, data}` — one word written into the core's inbox: a channel's report serialised (the readout result, a DIO edge, …) or the board hub's re-puts (group words, barrier releases, signals — [PutHub](PutHub.md)) | posted, polled locally; no round-trip |
 
 This is roughly half the wires of a TileLink a+d, one-way, and it sheds the fabric decode/arbiter logic
 at the converter edge entirely. The building blocks:
@@ -59,14 +59,20 @@ at the converter edge entirely. The building blocks:
 - [`RfLinkBridge`](RfLinkBridge.md) sits next to the core: a tiny write-only TileLink slave over the RF
   window that **acks every CPU store locally in one cycle** (so the core's bus arc stays short and in the
   core region) and emits one ordered `Flow(RfCmd)` downstream.
-- [`RfLink`](RfLink.md) `pipe`s the stream (`linkPipe` `RegNext` stages) and `demux`es it to each
-  channel's sub-window (pure combinational routing — a `Flow` has no back-pressure, so no arbiter).
-- [`PulseParamBuffer`](PulseParamBuffer.md) is the DSP-side register file for one generator, driven by
+- [`RfLink`](RfLink.md) `pipe`s the stream (`linkPipe` `RegNext` stages) and `demux`es it to one
+  `0x10000` sub-window per entry of the core's `spec.channels` (pure combinational routing — a `Flow` has
+  no back-pressure, so no arbiter).
+- [`PulseParamBuffer`](PulseParamBuffer.md) is the DSP-side register file for one channel, driven by
   the demuxed `RfCmd` instead of a `SlaveFactory`. It is the only thing that must sit at the converter
-  edge with the generator. Packaged with its generator as a [`PulseDriveChannel`/`DemodChannel`](RfChannels.md).
-- [`ReadoutResultLink`](ReadoutResultLink.md) returns the decoder result on the up-`Flow` into a
-  core-local `ReadoutResultSink` the CPU polls — so the halting `res` read is a short local arc, not a
-  long round-trip.
+  edge with the datapath block. A **channel kind** packages the two behind one
+  [`Channel`](RfChannels.md) interface the shell instantiates through:
+  [`PulseDriveChannel`](RfChannels.md) (`pulse`, DAC-bound), [`DemodChannel`](RfChannels.md) (`demod`,
+  the decoder's carrier) and [`TimedDio`](TimedDio.md) (`dio`, 16 timed output + 16 timestamped input
+  lines).
+- [`EventLink`](EventLink.md) carries every reporting channel's events up the return `Flow` into
+  core-local sinks the CPU polls — the readout result is one kind (a latched level rebuilt from
+  settled/cleared beats), a DIO edge another (a consume-on-read FIFO with the cause time) — so the
+  halting `res` / `pop_event` read is a short local arc, not a long round-trip.
 
 ## The `startTime` software contract
 
@@ -99,10 +105,10 @@ acceptable — real-time precision lives in the DSP `TimedQueue`, not the CPU wa
 
 ## Read paths are split
 
-Of every CPU `dBus` read, only the **readout decoder result** crosses the gap (on the up-`Flow`).
-Everything else is made core-local: the data RAM, the `time` copy, `timeCmp`/`waitTimeCmp` (a local
-compare against the piped `time`), and the `fromHost` mailbox all live in the core region and never
-cross. The control block that holds these is [`ControlMemMaps`](ControlMemMaps.md).
+Of every CPU `dBus` read, only the **channels' reports** cross the gap (on the up-`Flow`, into the core's
+event sinks). Everything else is made core-local: the data RAM, the `time` copy and `timeCmp`/
+`waitTimeCmp` (a local compare against the piped `time`) all live in the core region and never cross. The
+control block that holds these is [`ControlMemMaps`](ControlMemMaps.md).
 
 ## `linkPipe`
 
@@ -147,7 +153,10 @@ Two further levers fall out of this geometry:
   DSP than one clock-region row provides, so the realizable form is the global X1–X5 confine.)
 
 The full ZCU216 build pins 14 cores at 3-per-row across the five live X0 rows (Y3–Y7). With this floorplan
-the SoC reaches **dspClk WNS ≈ −0.156 ns (~484 MHz) OOC** on the `-2` part, worst path internal to a core.
+the SoC reaches **dspClk WNS ≈ −0.156 ns (~484 MHz) OOC** on the `-2` part, worst path internal to a core;
+with the put network's board hub ([PutHub](PutHub.md), four pipeline stages, in the floating region) the
+same flow closes at **−0.111 ns**, worst path in the hub; the block-design flow (`vivado-scripts/riscvsoc-bd`,
+`zcu216-14q.json`) meets **0.000 ns** after its incremental TimingClosure pass (`close-incremental.sh`).
 fmax is a soft constraint for this project; routability and `dspClk` closure are the point. The floorplan
 is baked by the per-flow `pblocks-*.tcl` in the Vivado flows — see [`Zcu216Top`](Zcu216Top.md) and
 `../../vivado-scripts/README.md`.
@@ -160,10 +169,11 @@ is baked by the per-flow `pblocks-*.tcl` in the Vivado flows — see [`Zcu216Top
 - [`Zcu216Top`](Zcu216Top.md) — ZCU216 board wrapper(s) + the Vivado flows.
 - [`RiscqRfWithPulseTableFiber`](RiscqRfWithPulseTableFiber.md) — one qubit (core + datapath over the link).
 - [`RiscvSoc`](RiscvSoc.md) — the hard, registered-boundary core unit (the floorplan target).
+- [`SocSpec`](SocSpec.md) — the build description (cores → channel lists) and the derived host map.
 - Posted link: [`RfLinkBridge`](RfLinkBridge.md) · [`RfLink`](RfLink.md) ·
-  [`ReadoutResultLink`](ReadoutResultLink.md) · [`PostedStoreShim`](PostedStoreShim.md).
-- RF datapath: [`RfChannels`](RfChannels.md) · [`PulseParamBuffer`](PulseParamBuffer.md) ·
-  [`ControlMemMaps`](ControlMemMaps.md).
+  [`EventLink`](EventLink.md) · [`PostedStoreShim`](PostedStoreShim.md).
+- RF datapath: [`RfChannels`](RfChannels.md) · [`TimedDio`](TimedDio.md) ·
+  [`PulseParamBuffer`](PulseParamBuffer.md) · [`ControlMemMaps`](ControlMemMaps.md).
 - Fabric glue: [`RiscqFiber`](RiscqFiber.md) · [`TileLinkMemFiber`](TileLinkMemFiber.md) ·
   [`MemMapFiber`](MemMapFiber.md) · [`DualClockRamFiber`](DualClockRamFiber.md) · [`BramFiber`](BramFiber.md).
 - [`SOC_TIPS.md`](SOC_TIPS.md) — SoC/fabric/SpinalSim gotchas (read before SoC work).

@@ -40,6 +40,14 @@ def sample_rate(params: SocParams) -> float:
     return BATCH_SIZE * params.dsp_freq_hz
 
 
+def channel_rate(params_or_map, channel) -> float:
+    """One channel's own converter sample rate: its lanes per batch, one batch per dsp cycle — 16
+    on a DAC-bound pulse channel (= sample_rate), 4 on the ADC-bound demod. `channel` is a
+    ChannelInfo (riscq.map) or a ChannelSpec; `params_or_map` a SocParams or a SocMap."""
+    params = getattr(params_or_map, "params", params_or_map)
+    return channel.lanes * params.dsp_freq_hz
+
+
 def _freq_code(f_hz: float, params: SocParams) -> int:
     """Plain carrier/demod frequency code = per-SAMPLE phase advance in pi units, SF(16):
     code = round(f_hz * 2^16 / (16 * dsp_freq_hz)), folded mod 2^16 into signed SF(16) so a tone

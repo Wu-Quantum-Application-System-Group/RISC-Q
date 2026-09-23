@@ -34,7 +34,33 @@ being measured.
 cd vivado-scripts/riscvsoc-bd
 ./build-riscvsoc-bd.sh                       # 14q, floorplan, synth + impl in the block design
 RISCQ_QUBITS=3 ./build-riscvsoc-bd.sh    # smaller config (faster)
+./close-incremental.sh                       # then: the incremental TimingClosure pass on that build
 ```
+
+**Re-build, 8 cores (2026-09-18, `x6y3.json` + the wrap-safe `waitTimeCmp` — SOC_TIPS §5):**
+`RISCQ_CONFIG=software/configs/x6y3.json RISCQ_PROJ_NAME=x6y3-bd-wrapfix ./build-riscvsoc-bd.sh` meets
+timing first pass again: dspClk **+0.005 ns** / 0 failing of 844 208 endpoints (WHS +0.010), all
+constraints met, XSA at `build/x6y3-bd-wrapfix/PulseTableSoc.xsa`. Tighter than the 2026-09-15 +0.037
+(the router dipped to −0.008 before its final pass recovered it), so treat a re-run of this tree as
+marginal-but-closing rather than comfortable.
+
+**Result of record, 8 cores (2026-09-15, `x6y3.json`, same tree — put-network hub + the channel-list
+spec):** `RISCQ_CONFIG=software/configs/x6y3.json RISCQ_PROJ_NAME=x6y3-bd ./build-riscvsoc-bd.sh`
+**meets timing first pass, no incremental close needed**: dspClk **+0.037 ns** / 0 failing of 779 428
+endpoints (WHS +0.009), `clk_pl_0` +2.205, `hostClk` +3.422, "All user specified timing constraints
+are met". ~82 min wall; LUT 29 %, FF 27 %, BRAM 18 %, URAM 10 %, DSP 38 %. The 8 cores take the same
+X0 bands the 14q floorplan defines (`RISCQ_ROW`/`RISCQ_PERROW` defaults, cores 0–7 → X0Y3 band 0 …
+X0Y5 band 1), so nothing but `RISCQ_CONFIG` changes — six fewer cores competing for the column is
+the likely reason this closes where 14q needs `close-incremental.sh`.
+
+**Result of record (2026-09-14, `zcu216-14q.json` with the put-network hub, specs/cross-core/02):**
+`build-riscvsoc-bd.sh` lands at dspClk **−0.015 ns** (86 failing endpoints, all core-internal and
+pulse-buffer paths); `close-incremental.sh` — `inc/incr-close.tcl`, an incremental re-implementation
+seeded by that run's own routed checkpoint with `read_checkpoint -incremental … -directive
+TimingClosure` — closes it at **0.000 ns / 0 failing endpoints** (`clk_pl_0` +1.9, `hostClk` +2.1, the
+async group +0.02), `routed_incr.dcp` being the closed design. Placer directives alone did not close it
+(`Explore` −0.106, `AltSpreadLogic_high` −0.040, `ExtraTimingOpt` −0.123); an AggressiveExplore
+phys_opt alone reproduced −0.015 exactly (the flow is deterministic).
 
 Outputs land in `<repo>/build/riscvsoc-bd/` (git-ignored): the generated RTL, `timing_impl.rpt` /
 `util_impl.rpt` (the headline WNS/TNS + per-pblock utilisation), the BD, the `*.runs/` and `vivado.log`.
@@ -62,7 +88,7 @@ The driver selects the floorplan + core retiming through two `inc/run.tcl` hooks
 ## Env knobs
 
 Handled by `build-riscvsoc-bd.sh`: `RISCQ_VIVADO_BIN`, `RISCQ_QUBITS` (14), `RISCQ_SKIP_GEN`,
-`RISCQ_PROJ_NAME` (`riscvsoc-bd`), `RISCQ_PLACE_DIRECTIVE` (`ExtraNetDelay_high`).
+`RISCQ_PROJ_NAME` (`riscvsoc-bd`), `RISCQ_PLACE_DIRECTIVE` (`ExtraNetDelay_high`), `RISCQ_PHYSOPT_DIRECTIVE` (both phys_opt passes, e.g. `AggressiveExplore`).
 
 Read by `pblocks-bd.tcl`: `RISCQ_ROW` (3), `RISCQ_PERROW` (3), `RISCQ_CONFINE`
 (`global`|`region`|`none`, default `global`), `RISCQ_BD_BASE` (`riscq_bd_i/top/inst`).

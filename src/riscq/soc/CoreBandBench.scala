@@ -4,7 +4,7 @@ import spinal.core._
 import spinal.core.fiber.Fiber
 import spinal.lib._
 import riscq.riscv.RiscqParam
-import riscq.soc.link.{ReadoutResult, RfCmd}
+import riscq.soc.link.{EventLink, RfCmd}
 
 /**
  * Single-core band bench (specs/riscv-fmax.md Phase A2): one [[RiscvSoc]] in the **exact SoC
@@ -90,12 +90,15 @@ case class CoreBandBench(
     val demodAcc  = mkAcc(demodPipe)
 
     // up-link result back through the registered boundary (exercises the full resultIn width)
-    val res = Flow(ReadoutResult(readoutAccWidth))
+    val res = Flow(RfCmd(EventLink.inboxAddrWidth))   // the up-link: puts into the inbox
     res.valid        := demodPipe.valid && (demodPipe.payload.address === 0x30000)
-    res.payload.res  := demodAcc(0)
-    res.payload.real := demodAcc.asSInt.resize(readoutAccWidth)
-    res.payload.imag := demodAcc(16, 16 bits).asSInt.resize(readoutAccWidth)
+    res.payload.address := demodAcc(0, EventLink.inboxAddrWidth bits).asUInt
+    res.payload.data    := demodAcc
     riscvSoc.resultIn << keepPipe(res, linkPipe)
+
+    // host-window stream tied off: the bridge cells stay inside the core (the pblock target); the CC
+    // FIFO and the shared funnel live outside it and are not part of this bench.
+    riscvSoc.hostCmd.ready := True
 
     // iLoad tied off by a quiet host master (no program needed for timing)
     val tieILoad = Fiber build { riscvSoc.iLoad.node.bus.a.setIdle(); riscvSoc.iLoad.node.bus.d.ready := True }

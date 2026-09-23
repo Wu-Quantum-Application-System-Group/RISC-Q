@@ -10,10 +10,18 @@ old gate spent `relax = 8000` × 32 shots × 3 preps — the second-worst test i
 rediscover, through shot noise, that a diagonal-dominant matrix inverts.
 
 What is left for the simulator is the one claim the host cannot make: that the three PRODUCTION
-prep programs — idle, the GE π, and `_ef_prep_prog`'s GE π + EF π — really drive the qutrit to
-levels 0, 1 and 2. That is an **L2 state probe** (01 §4): |2⟩ is invisible to the hardware `res`
-bit (one threshold, two outcomes), so it is read off `drv.sim.model_state()["populations"]`, one
-noiseless shot per prep against the analytic target.
+prep sequences — idle, the GE π (`ReadoutCalibration`'s `Cond(prep, X90·X90)`), and
+`ReadoutFidelity._run_3level`'s GE π + EF π — really drive the qutrit to levels 0, 1 and 2. That is
+an **L2 state probe** (01 §4): |2⟩ is invisible to the hardware `res` bit (one threshold, two
+outcomes), so it is read off `drv.sim.model_state()["populations"]`, one noiseless shot per prep
+against the analytic target.
+
+universal-cal V6: the classifier layer moved to `riscq.cal.analysis.classifier` and the readout
+classes onto the universal base, so the imports are repointed and the two L2 probes now run the
+classes' own sequence through `riscq.cal.experiment.Experiment` (`_rawiq_prog` / `_ef_prep_prog`
+are gone with the kernel-per-class code). Nothing was retired from this module: the classes'
+public behaviour is covered by tests/test_cals_readout.py, the timing rules by
+tests/test_sequence.py, and the old-vs-new signal parity is recorded at git commit 347f749.
 """
 
 import math
@@ -21,12 +29,15 @@ import math
 import numpy as np
 import pytest
 
-from riscq.cal import Classifier, Config, ReadoutFidelity
+from riscq.cal import Classifier, Config, ReadoutCalibration, ReadoutFidelity
+from riscq.cal.analysis.classifier import (ClassifierN, _gmm_fit, _gmm_predict, _snr, rcorr,
+                                           res_fidelity)
 from riscq.cal.base import GATE_ENV, gate_sigma
-from riscq.cal.readout import (ClassifierN, _ef_prep_prog, _gmm_fit, _gmm_predict, _rawiq_prog,
-                               _snr, rcorr, res_fidelity)
+from riscq.cal.cals.readout import PREP
+from riscq.cal.experiment import Experiment
+from riscq.cal.measure import Measure
+from riscq.cal.sequence import Gate
 from riscq.pulses import Pulse, units
-from tests.probe import Probe
 
 # The planted qutrit's two carriers, an anharmonicity of exactly 4096 codes (100 MHz on this build)
 # apart. `ThreeLevelModel` picks which transition a batch drives by demodulating the gate DAC against
@@ -204,7 +215,6 @@ def test_plot_draws_the_qcal_figure():
     mpl.use("Agg")
     from matplotlib.collections import PathCollection
 
-    from riscq.cal import ReadoutCalibration
     rc = ReadoutCalibration(None, [0, 1], shots=8)
     for q in rc.qubits:
         rc.classifier[q] = Classifier(*_decayed_clusters(0.05, n=64, seed=5 + q))
@@ -266,8 +276,8 @@ def test_three_level_fidelity_requires_a_pretrained_classifier():
     with pytest.raises(AssertionError, match="n_levels"):
         ReadoutFidelity(cfg, 0, n_levels=4)
     clf = ClassifierN([np.zeros((4, 2)), np.ones((4, 2)), 2 * np.ones((4, 2))])
-    assert ReadoutFidelity(cfg, 0, n_levels=3, classifier=clf).classifiers == {0: clf}
-    assert ReadoutFidelity(cfg, 0).classifiers == {}          # the 2-level path needs none
+    assert ReadoutFidelity(cfg, 0, n_levels=3, classifier=clf).classifier is clf
+    assert ReadoutFidelity(cfg, 0).classifier is None         # the 2-level path needs none
 
 
 # ── L2: the three REAL preps reach levels 0 / 1 / 2 (spec 14 F2) ──
@@ -309,7 +319,7 @@ def _qutrit(m):
             "readout_code": 2048, "readout_amp": 18000.0, "init_level": 0}
 
 
-# One test per PROGRAM, because each program is its own image and an image load is ~7 k simulated
+# One test per IMAGE, because each experiment is its own image and an image load is ~7 k simulated
 # batches — the two together overrun the 20 k per-test cap (specs/software-test-refactor/02 §1).
 #
 # Both replace the halves of a 3 × 32-shot, `relax = 8000` confusion measurement whose |2> row only
@@ -318,39 +328,48 @@ def _qutrit(m):
 
 @pytest.mark.cosim
 def test_ge_preps_reach_levels_0_and_1(cosim):
-    """L2 (spec 14 F2) — the |0> and |1> rows of the 3-level confusion come from ONE `_rawiq_prog`
-    image whose `prep` runtime scalar picks idle or the GE π (two X90 plays). Both must land on the
-    level they name, and the |1> prep must not leak into |2>.
+    """L2 (spec 14 F2) — the |0> and |1> rows of the 3-level confusion come from ONE image whose
+    `prep` runtime param picks idle or the GE π (`ReadoutCalibration`'s own `Cond(prep, X90·X90)`
+    sequence, read RAW). Both must land on the level they name, and the |1> prep must not leak
+    into |2>.
 
     The target is analytic and exact: the GE rate is planted so the two-X90 prep is a π in
     {|0>, |1>}, so the prep is a textbook gate and the populations are 1 at the intended level and 0
     elsewhere. Nothing is fitted and nothing is sampled — |2> is invisible to the `res` bit, so the
-    populations come off `model_state()`."""
-    _, m = cosim
+    populations come off `model_state()`, one noiseless shot per prep (the Experiment's
+    `before`/`after` hooks re-plant the model per rerun, so each point starts from |0> in zero
+    simulated cycles)."""
+    drv, m = cosim
     q = 0
-    prog, _ = _rawiq_prog(m, _cfg3(m, q), q, "X90", 1)
-    p, spec = Probe(cosim, {q: prog}), _qutrit(m)
+    cal = ReadoutCalibration(_cfg3(m, q), q, shots=1)
+    spec, pops = _qutrit(m), {}
+    Experiment(cal.cfg, [q], {q: cal.sequence(q, ())}, {q: ()}, (PREP,), cal.measure(), cal.shots,
+               label="ReadoutCalibration").run(
+        drv, before=lambda vals: drv.sim.set_model(spec),
+        after=lambda vals: pops.__setitem__(int(vals[0]), drv.sim.model_state()["populations"]))
     for prep, want in ((0, [1.0, 0.0, 0.0]), (1, [0.0, 1.0, 0.0])):
-        pops = p.state(spec, {q: {"prep": prep}})["populations"]
-        print(f"\n[prep {prep}] populations={np.round(pops, 4).tolist()} want={want}")
-        assert pops == pytest.approx(want, abs=0.02), \
-            f"the prep={prep} program left the qutrit at {np.round(pops, 4).tolist()}, not {want}"
+        print(f"\n[prep {prep}] populations={np.round(pops[prep], 4).tolist()} want={want}")
+        assert pops[prep] == pytest.approx(want, abs=0.02), \
+            f"the prep={prep} sequence left the qutrit at {np.round(pops[prep], 4).tolist()}, not {want}"
 
 
 @pytest.mark.cosim
 def test_ef_prep_reaches_level_2(cosim):
-    """L2 (spec 14 F2) — the |2> row's prep: `_ef_prep_prog`, a GE π followed by an EF π at the
-    config's EF X amplitude, on its own image with the carrier retuned mid-shot. It is the program
-    `ReadoutFidelity._run_3level` runs, unchanged.
+    """L2 (spec 14 F2) — the |2> row's prep: a GE π followed by an EF π at the config's EF X
+    amplitude, on its own image with the carrier retuned mid-shot. It is the sequence
+    `ReadoutFidelity._run_3level` runs for its third cloud, unchanged.
 
     Both rates are planted exact (GE: the two-X90 prep is a π in {|0>, |1>}; EF: the EF X is a π in
     {|1>, |2>}), so the analytic target is a clean |2> — which also makes it the sharpest available
     statement about the mid-shot GE→EF retune: any slip in WHEN the new carrier takes effect leaves
     population behind in |1>."""
-    _, m = cosim
+    drv, m = cosim
     q = 0
-    prog, par, _ = _ef_prep_prog(m, _cfg3(m, q), q, 1)
-    pops = Probe(cosim, {q: prog}).state(_qutrit(m), {q: par})["populations"]
+    ef = [Gate("x90"), Gate("x90"), Gate("EF/x")]        # ReadoutFidelity._run_3level's |2> prep
+    drv.sim.set_model(_qutrit(m))
+    Experiment(_cfg3(m, q), [q], {q: ef}, {q: ()}, (), Measure.raw(phase=0.0), 1,
+               label="ReadoutFidelity3_ef").run(drv)
+    pops = drv.sim.model_state()["populations"]
     print(f"\n[prep |2>] populations={np.round(pops, 4).tolist()} want=[0.0, 0.0, 1.0]")
     assert pops == pytest.approx([0.0, 0.0, 1.0], abs=0.02), \
         f"the GE π + EF π prep left the qutrit at {np.round(pops, 4).tolist()}, not |2>"

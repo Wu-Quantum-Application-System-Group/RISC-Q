@@ -85,15 +85,19 @@ if {$confine == 2} {
     puts "\[riscvsoc-bd\] datapath row Y${rr} → X1Y${rr}:X5Y${rr} ([llength $dpRowCells($rr)] cells)"
   }
   set pbs [create_pblock pb_shared]
-  set shared [get_cells -quiet -hierarchical -filter "PRIMITIVE_LEVEL == LEAF && NAME =~ ${base}/* && NAME !~ ${base}/*riscqArea_riscqCores_* && NAME !~ ${base}/*_riscvSoc/*"]
+  # White Rabbit builds: the GTY PHY subtree must stay OUT of any hard confine — its channel is
+  # LOC'd at X0Y4 (SFP0) and the BUFG_GT/BUFG_GT_SYNCs it drives are only legal in the GT's own
+  # clock region (rule_gt_bufggt: IO Clock Placer fails otherwise; the ANY_CMT_COLUMN workaround
+  # would put the link clocks on general routing and break WR's deterministic latency).
+  set shared [get_cells -quiet -hierarchical -filter "PRIMITIVE_LEVEL == LEAF && NAME =~ ${base}/* && NAME !~ ${base}/*riscqArea_riscqCores_* && NAME !~ ${base}/*_riscvSoc/* && NAME !~ ${base}/wrGtyPhy_1/*"]
   add_cells_to_pblock -quiet $pbs $shared
   resize_pblock $pbs -add CLOCKREGION_X1Y0:CLOCKREGION_X5Y7
   set_property IS_SOFT FALSE $pbs
   puts "\[riscvsoc-bd\] shared fabric → X1Y0:X5Y7 ([llength $shared] cells)"
 } elseif {$confine == 1} {
-  # global form: the whole floating datapath into one X1Y0:X5Y7 block.
+  # global form: the whole floating datapath into one X1Y0:X5Y7 block (wrGtyPhy excluded — see above).
   set pbd [create_pblock pb_datapath]
-  set dpCells [get_cells -hierarchical -filter "PRIMITIVE_LEVEL == LEAF && NAME =~ ${base}/* && NAME !~ ${base}/*_riscvSoc/*"]
+  set dpCells [get_cells -hierarchical -filter "PRIMITIVE_LEVEL == LEAF && NAME =~ ${base}/* && NAME !~ ${base}/*_riscvSoc/* && NAME !~ ${base}/wrGtyPhy_1/*"]
   add_cells_to_pblock -quiet $pbd $dpCells
   resize_pblock $pbd -add CLOCKREGION_X1Y0:CLOCKREGION_X5Y7
   set_property IS_SOFT FALSE $pbd
@@ -143,6 +147,18 @@ if {[llength $_ccrst] > 0} {
   puts "\[riscvsoc-bd\] waived iLoad-CC buffered-reset recovery arcs ([llength $_ccrst] nets)"
 } else {
   puts "\[riscvsoc-bd\] WARN: no iLoad-CC reset_synchronized nets matched under ${base} — check naming"
+}
+
+# Same waiver for the host-window CC FIFOs (specs/software/22 §2.2): each core's result stream crosses
+# dspCd -> hostCd in a StreamFifoCC that carries the identical buffered cross-clock reset, derived from
+# the same global dspRst. Same argument: it is synchronized, released once while the FIFOs are idle, and
+# every pointer carries init(0), so the recovery/removal arc is non-functional.
+set _hwrst [get_nets -hierarchical -filter "NAME =~ ${base}/*hostWinFifo*synchronized*"]
+if {[llength $_hwrst] > 0} {
+  set_false_path -through $_hwrst
+  puts "\[riscvsoc-bd\] waived hostWindow-CC buffered-reset recovery arcs ([llength $_hwrst] nets)"
+} else {
+  puts "\[riscvsoc-bd\] WARN: no hostWinFifo synchronized nets matched under ${base} — check naming"
 }
 
 # ── fix #2 (optional, RISCQ_MREG_LOCK): freeze the carrierGen ComplexMul product DSPs against phys_opt ──

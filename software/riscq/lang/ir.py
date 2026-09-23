@@ -176,6 +176,7 @@ class KernelIR:
     params: list[str]  # unbound int params, signature order
     arrays: dict[str, int]  # Array name -> element count
     input_arrays: set[str]  # Array names that are host-preloaded inputs (.data, not .bss)
+    host_arrays: dict  # Array name -> (byte offset in the core's host window, element count)
     locals: dict[str, str]  # local name -> "int" | "ptr"
     tables: list[Table]  # live ParamTables, resolution order
     body: list
