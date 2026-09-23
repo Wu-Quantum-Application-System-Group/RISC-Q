@@ -55,8 +55,8 @@ object PulseTableSocSim extends App {
   // — the schedule, the dacMap reduction and the VNA readout are otherwise the same writes the control
   // software issues. The readout is carrier-triggered: firing the demod pulse IS the readout (no arm).
   def runSoc(linkPipe: Int): Unit = {
-  val gateStAddr  = 0x14100  // gate buffer's per-buffer startTime (RF window @0x10000 + 0x4100)
-  val demodStAddr = 0x34100  // demod buffer's per-buffer startTime (RF window @0x30000 + 0x4100)
+  val gateStAddr  = 0x14100  // gate buffer's per-buffer startTime (put window @0x10000 + 0x4100)
+  val demodStAddr = 0x34100  // demod buffer's per-buffer startTime (put window @0x30000 + 0x4100)
   val resAddr    = 0x4200    // core-local ReadoutResultSink (res@0x4200 / real@0x4204 / imag@0x4208)
   val realAddr   = 0x4204
   val imagAddr   = 0x4208

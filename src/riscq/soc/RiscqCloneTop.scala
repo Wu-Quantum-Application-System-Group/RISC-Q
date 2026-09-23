@@ -4,7 +4,7 @@ import spinal.core._
 import spinal.core.fiber.Fiber
 import spinal.lib._
 import riscq.riscv.RiscqParam
-import riscq.soc.link.{EventLink, RfCmd}
+import riscq.soc.link.{EventLink, Put}
 import riscq.soc.spec.SocSpecMap
 
 import scala.collection.mutable.ArrayBuffer
@@ -36,12 +36,12 @@ case class FarmRegion(
     riscqCd: ClockDomain,
     includeDummies: Boolean,
     readoutAccWidth: Int = 32,
-    rfAddrWidth: Int = SocSpecMap.putAddrWidth
+    putAddrWidth: Int = SocSpecMap.putAddrWidth
 ) extends Component {
   val anchorOut = out port Bool()
   // cores-only mode exposes each core's posted link; dummies-in-region mode keeps it internal.
-  val cmd      = (!includeDummies) generate Vec.fill(perRegion)(master port Flow(RfCmd(rfAddrWidth)))
-  val resultIn = (!includeDummies) generate Vec.fill(perRegion)(slave port Flow(RfCmd(EventLink.inboxAddrWidth)))
+  val cmd      = (!includeDummies) generate Vec.fill(perRegion)(master port Flow(Put(putAddrWidth)))
+  val resultIn = (!includeDummies) generate Vec.fill(perRegion)(slave port Flow(Put(EventLink.inboxAddrWidth)))
 
   val logic = dspCd on new Area {
     // a pipe that keeps every stage a distinct, un-optimizable FF (a placeable anchor).
@@ -55,7 +55,7 @@ case class FarmRegion(
       val riscvSoc = RiscvSoc(
         plugins = coreParam.plugins(),
         riscqCd = riscqCd,
-        readoutAccWidth = readoutAccWidth, rfAddrWidth = rfAddrWidth)
+        readoutAccWidth = readoutAccWidth, putAddrWidth = putAddrWidth)
       // Per-core local batch-time counter, DONT_TOUCH'd so Vivado can't merge identical counters back
       // into one high-fanout broadcast net — mirrors the SoC's replicate-not-broadcast of the batch clock.
       val coreTime = Reg(UInt(32 bits)) init 0
@@ -69,7 +69,7 @@ case class FarmRegion(
         val acc = Reg(Bits(32 bits)) init 0
         acc.addAttribute("DONT_TOUCH")
         when(cmdDn.valid)(acc := acc ^ cmdDn.payload.data ^ cmdDn.payload.address.asBits.resize(32))
-        val res = Flow(RfCmd(EventLink.inboxAddrWidth))   // the up-link: puts into the inbox
+        val res = Flow(Put(EventLink.inboxAddrWidth))   // the up-link: puts into the inbox
         res.valid        := cmdDn.valid && (cmdDn.payload.address === 0x30000)
         res.payload.address := acc(0, EventLink.inboxAddrWidth bits).asUInt
         res.payload.data    := acc
@@ -111,7 +111,7 @@ case class RiscqCloneTop(
     coreParam: RiscqParam = RiscqParam(gshareMem = true, csrWarl = true),
     dummiesInRegion: Boolean = false,
     readoutAccWidth: Int = 32,
-    rfAddrWidth: Int = SocSpecMap.putAddrWidth
+    putAddrWidth: Int = SocSpecMap.putAddrWidth
 ) extends Component {
   // Pure dspClk OOC top (host-load CDC moved out of RiscvSoc; iLoad is dspCd, tied off) — no host clock.
   val dspClk, dspRst = in Bool()
@@ -132,7 +132,7 @@ case class RiscqCloneTop(
       val region = FarmRegion(
         perRegion = perRegion, linkPipe = linkPipe, coreParam = coreParam,
         dspCd = dspCd, riscqCd = riscqCd,
-        includeDummies = dummiesInRegion, readoutAccWidth = readoutAccWidth, rfAddrWidth = rfAddrWidth)
+        includeDummies = dummiesInRegion, readoutAccWidth = readoutAccWidth, putAddrWidth = putAddrWidth)
       outs += region.anchorOut
 
       if (!dummiesInRegion) {
@@ -142,7 +142,7 @@ case class RiscqCloneTop(
           val acc = Reg(Bits(32 bits)) init 0
           acc.addAttribute("DONT_TOUCH")
           when(cmdDn.valid)(acc := acc ^ cmdDn.payload.data ^ cmdDn.payload.address.asBits.resize(32))
-          val res = Flow(RfCmd(EventLink.inboxAddrWidth))   // the up-link: puts into the inbox
+          val res = Flow(Put(EventLink.inboxAddrWidth))   // the up-link: puts into the inbox
           res.valid        := cmdDn.valid && (cmdDn.payload.address === 0x30000)
           res.payload.address := acc(0, EventLink.inboxAddrWidth bits).asUInt
           res.payload.data    := acc

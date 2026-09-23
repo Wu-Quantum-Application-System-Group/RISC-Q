@@ -53,7 +53,7 @@ writes to named globals ([01 §2](../../specs/software/01-hardware-contract.md))
 ## What is *not* here
 
 - **`startTime`** is no longer a control-block register: under the posted link it is **per-buffer**, written
-  down the `RfCmd` stream into each [PulseParamBuffer](PulseParamBuffer.md) (`@0x4100` within the RF
+  down the `Put` stream into each [PulseParamBuffer](PulseParamBuffer.md) (`@0x4100` within the channel's
   window). The control-map sim adds a local `startTime` reg only to exercise a write; production
   `startTime` rides the link.
 - **`res`/`real`/`imag`** (readout result) are served by one of the core's

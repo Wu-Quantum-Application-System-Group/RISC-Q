@@ -16,11 +16,11 @@ posted link's already-registered seam:
 ```
    ┌──────────── RiscvSoc (hard Component, pinned to X0) ────────────┐
    │  RiscqFiber core + I/D RAM + control block (time/done)          │
-   │  + RfLinkBridge (acks CPU stores locally) + the event sinks     │
-   └──── cmd: Flow(RfCmd) ─┬────────────────────────  resultIn ◀─────┘
+   │  + PutBridge (acks CPU stores locally) + the event sinks     │
+   └──── cmd: Flow(Put) ─┬────────────────────────  resultIn ◀─────┘
                            │ getPipe(linkPipe)                 │ getPipe(linkPipe)
         ┌──────────────────┴── posted (dspCd, datapath in X1–X5) ────┴──────────┐
-        │  RfLink.demux ─┬─ channel 0 @0x00000 ─┐                               │
+        │  PutLink.demux ─┬─ channel 0 @0x00000 ─┐                               │
         │                ├─ channel 1 @0x10000  ├─ mkChannel(spec.channels(k), k)│
         │                └─ channel k @k·0x10000┘                                │
         │                   decoder (ReadoutDecoder) ◀─ demod carrier ─┐         │
@@ -31,10 +31,10 @@ posted link's already-registered seam:
 
 - **`riscvSoc`** — the [`RiscvSoc`](RiscvSoc.md) hard `Component`: the timing-critical RISC-V core
   ([`RiscqFiber`](RiscqFiber.md)) + real BRAM/UltraRAM I/D RAM + the CPU-mapped control block + the
-  [`RfLinkBridge`](RfLinkBridge.md) (which acks every CPU RF store locally in one cycle) + the core's
-  [event sinks](EventLink.md). Its narrow registered I/O is `time` in, `cmd: Flow(RfCmd)` out,
-  `resultIn: Flow(RfCmd)` in (puts into the inbox), `hostCmd` out, `done` out (plus `iLoad`/`dTap` slave-IO). The
-  `0x10000` RF window and `0x80000000` data-RAM maps are all inside it.
+  [`PutBridge`](PutBridge.md) (which acks every CPU RF store locally in one cycle) + the core's
+  [event sinks](EventLink.md). Its narrow registered I/O is `time` in, `cmd: Flow(Put)` out,
+  `resultIn: Flow(Put)` in (puts into the inbox), `hostCmd` out, `done` out (plus `iLoad`/`dTap` slave-IO). The
+  `0x10000` put window and `0x80000000` data-RAM maps are all inside it.
 - **The shell** applies the `linkPipe` `RegNext` stages each way (`getPipe(riscvSoc.cmd, linkPipe)` down,
   `getPipe(upSrc, linkPipe)` up) and demuxes `cmd` to the channels. Everything past the pipe — the demux,
   the channels, the decoder, the envelope BRAMs, dac/adc — lives **here** (the parent), not in
@@ -42,11 +42,11 @@ posted link's already-registered seam:
 
 ### The RF datapath (`posted`, dspCd) — one channel per spec entry
 
-The piped `cmd` stream is fanned by [`RfLink.demux`](RfLink.md) to one `0x10000`-wide sub-window per
+The piped `cmd` stream is fanned by [`PutLink.demux`](PutLink.md) to one `0x10000`-wide sub-window per
 channel: channel `k` owns `k · 0x10000` of the core's put window — node `k` of
-`rfAddrWidth = SocSpecMap.putAddrWidth = 28` ([`SocSpecMap`](SocSpec.md)); nodes past the channel count
+`putAddrWidth = SocSpecMap.putAddrWidth = 28` ([`SocSpecMap`](SocSpec.md)); nodes past the channel count
 stay unmapped here (the decoder has no CPU-facing registers) and nodes `≥ 16` are system puts for the
-board hub ([`RfLink.nonLocal`](RfLink.md)). `mkChannel` is the one place a kind is named:
+board hub ([`PutLink.nonLocal`](PutLink.md)). `mkChannel` is the one place a kind is named:
 
 | `kind` | Block | Datapath |
 |---|---|---|
@@ -57,7 +57,7 @@ board hub ([`RfLink.nonLocal`](RfLink.md)). `mkChannel` is the one place a kind 
 Every channel is built with the core's `queueDepth`, its slot count (`slots`) and its bank's own
 `envAddrWidth = log2Up(envDepth)`, and is `setCompositeName`d `<channel>Channel`. Each wraps a
 [`PulseParamBuffer`](PulseParamBuffer.md) (the DSP-side register file driven by the demuxed
-`Flow(RfCmd)`), which owns the per-buffer `startTime` (the software contract from [`ARCH.md`](ARCH.md));
+`Flow(Put)`), which owns the per-buffer `startTime` (the software contract from [`ARCH.md`](ARCH.md));
 `io.timeBcast` takes the shared `time` broadcast. The drive generators run with `realOutput = true` — the
 DAC carries only the real lane, so the imaginary cone is tied off inside the generator and synthesis
 prunes the dead DSPs (see [`SOC_TIPS.md`](SOC_TIPS.md) §7.7).
@@ -71,7 +71,7 @@ weights integrated batch `startTime+i` by construction (verified bit-exact by `D
 ### The up-link
 
 [`EventPlan(spec)`](EventLink.md) says which channels report, with which sink kind and payload width; the
-shell collects their `EventSource`s **in the plan's order**, serialises each into puts at its sink's offsets, merges them onto one `Flow(RfCmd)` and pipes
+shell collects their `EventSource`s **in the plan's order**, serialises each into puts at its sink's offsets, merges them onto one `Flow(Put)` and pipes
 it `linkPipe` stages into `RiscvSoc`'s sinks. The demod's source is built here from the decoder
 (`EventLink.resultSource`) — it is the one kind whose reporter needs the ADC; every other reporting kind
 supplies its own `Channel.event`. The readout result therefore still reaches the CPU as a latched level
@@ -133,7 +133,7 @@ by name, so they raise at elaboration on a build without those channels.
 ## Verification
 
 No standalone sim — verified through the toplevel sims (`PulseTableSocSim`, `PulseTableSocCpuSim`) and the
-posted-link building-block sims (`PulseParamBufferSim`, `RfLinkBridgeSim`, `ReadoutResultLinkSim`,
+posted-link building-block sims (`PulseParamBufferSim`, `PutBridgeSim`, `ReadoutResultLinkSim`,
 `EventSinkSim`, `TimedDioSim`). Multi-channel cores are gated in co-sim by
 `software/tests/test_multichannel.py` (the `sim-mm` build) and `software/tests/test_dio.py` (`sim-dio`).
 See [`PulseTableSoc`](PulseTableSoc.md) for the commands.
@@ -143,7 +143,7 @@ See [`PulseTableSoc`](PulseTableSoc.md) for the commands.
 - [`RiscvSoc`](RiscvSoc.md) — the hard, registered-boundary core unit this wraps.
 - [`ARCH.md`](ARCH.md) — the posted-link architecture (why the split is at the registered seam).
 - [`SocSpec`](SocSpec.md) — the `CoreSpec` channel list this shell is built from.
-- Posted link: [`RfLinkBridge`](RfLinkBridge.md) · [`RfLink`](RfLink.md) · [`EventLink`](EventLink.md).
+- Posted link: [`PutBridge`](PutBridge.md) · [`PutLink`](PutLink.md) · [`EventLink`](EventLink.md).
 - Datapath: [`RfChannels`](RfChannels.md) · [`TimedDio`](TimedDio.md) ·
   [`PulseParamBuffer`](PulseParamBuffer.md) · [`PulseGenerator`](../dsp/PulseGenerator.md) ·
   [`ReadoutDecoder`](../dsp/ReadoutDecoder.md).

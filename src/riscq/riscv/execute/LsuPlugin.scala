@@ -53,7 +53,7 @@ class LsuPlugin(p: RiscqParam) extends FiberPlugin {
     Seq(SB, SH, SW).foreach(dec.addDecoding(_, IS_STORE, True))
     dlock.release()
 
-    // The data bus spans the full 32-bit SoC map (RF window, readout, data RAM) and any rs1+imm
+    // The data bus spans the full 32-bit SoC map (put window, readout, data RAM) and any rs1+imm
     // pointer ⇒ it stays XLEN-wide regardless of how narrow the fetch PC becomes.
     val dBus = master(DataMemBus(DataMemBusParam(addressWidth = Global.XLEN, dataWidth = 32)))
     dBus.simPublic()

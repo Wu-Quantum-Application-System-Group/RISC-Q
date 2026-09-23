@@ -55,7 +55,7 @@ def test_sink_table_and_header(mm):
     h = mm.gen_header(0)
     assert "#define RQ_SINK_DEMOD 0x4200" in h
     assert "#define RQ_CH_F0G1 0x20000" in h and "#define RQ_CH_FLUX 0x30000" in h
-    assert mm.rf_addr_width(0) == 28 and mm.rf_addr_width(1) == 28   # the put window, fixed
+    assert mm.put_addr_width(0) == 28 and mm.put_addr_width(1) == 28   # the put window, fixed
 
 
 @pytest.fixture(scope="module")
@@ -67,7 +67,7 @@ def test_dio_channel_in_spec_and_map(dio):
     ttl = dio.channel_named("ttl", 0)
     assert (ttl.kind, ttl.index, ttl.base, ttl.env_depth, ttl.dac, ttl.adc) == ("dio", 3, 0x40000, 0, None, None)
     assert dio.sinks(0)[:2] == [("demod", "result", 0x4200), ("ttl", "fifo", 0x4220)]
-    assert dio.slot_strides[3] == 1 and dio.rf_addr_width(0) == 28       # a bank-less hole; 4 channels
+    assert dio.slot_strides[3] == 1 and dio.put_addr_width(0) == 28       # a bank-less hole; 4 channels
     assert not [e for e in dio.entries() if "ttl" in e.name]              # no host window for it
     h = dio.gen_header(0)
     assert "#define RQ_CH_TTL 0x40000" in h and "#define RQ_SINK_TTL 0x4220" in h

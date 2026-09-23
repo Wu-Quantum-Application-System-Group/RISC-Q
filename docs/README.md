@@ -92,8 +92,8 @@ with the [SoC architecture](soc/ARCH.md)**; read [SOC_TIPS](soc/SOC_TIPS.md) bef
 | [BramFiber](soc/BramFiber.md) | Clock-crossing BRAM-blackbox bank as a fabric slave |
 | [BramWriteFiber](soc/BramWriteFiber.md) | Write-only clock-crossing BRAM bank (host-loaded envelope memory) |
 | [PostedStoreShim](soc/PostedStoreShim.md) | Local-ack posted-store adapter |
-| **link** — [RfLinkBridge](soc/RfLinkBridge.md) | Core-side posted-write funnel |
-| [RfLink](soc/RfLink.md) | The down-link payload, pipe, and demux |
+| **link** — [PutBridge](soc/PutBridge.md) | Core-side posted-write funnel |
+| [PutLink](soc/PutLink.md) | The posted-write payload, pipe, and demux |
 | [EventLink](soc/EventLink.md) | The up-link as puts into the core's inbox: the reporters' serialisation and the sink kinds (`result`, `fifo`, `latest`, `mailbox`) |
 | [PutHub](soc/PutHub.md) | The board hub: group words, counted barriers with a value-carrying release, unicast signals; the root and the lane on multi-board systems |
 | [PutLane](soc/PutLane.md) | Put frames on the White Rabbit lane: packer, router, unpacker, the CDC FIFOs around the PCS pair |

@@ -147,7 +147,7 @@ static inline void dio_slot(uint32_t ch, uint32_t slot, uint32_t mask, uint32_t 
  *                          barrier that ordered it (fresh by publish-then-barrier ordering);
  *   signal(core, m, x)     a unicast put into `core`'s mailbox m; wait_signal(m) HALTS until it lands
  *                          and consumes it. One sender per mailbox: the address says who. */
-#define RQ_NODE_ADDR(node)      (RQ_RF_WINDOW + ((uint32_t)(node) << 16))
+#define RQ_NODE_ADDR(node)      (RQ_PUT_WINDOW + ((uint32_t)(node) << 16))
 #define RQ_INBOX_OFF(cpu_addr)  ((cpu_addr) - RQ_SINK_BASE)
 static inline void publish(uint32_t g, uint32_t slot, uint32_t bit) {
     RQ_MMIO(RQ_NODE_ADDR(RQ_GROUP_NODE0 + g)) = (slot << 1) | (bit & 1);

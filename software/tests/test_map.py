@@ -158,7 +158,7 @@ def test_channel_table():
     assert isinstance(m.channel(0), ChannelInfo)
     with pytest.raises(ValueError, match="unknown channel index"):
         m.channel(3)
-    assert m.rf_addr_width() == 28
+    assert m.put_addr_width() == 28
 
 
 def test_channel_defines_in_header():

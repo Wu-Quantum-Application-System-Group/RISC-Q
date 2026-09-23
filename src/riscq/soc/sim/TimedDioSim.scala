@@ -4,7 +4,7 @@ import spinal.core._
 import spinal.core.sim._
 import spinal.lib._
 import riscq.soc.dio.TimedDio
-import riscq.soc.link.RfCmd
+import riscq.soc.link.Put
 
 /**
  * Sign-off for [[TimedDio]] (universal-control/01 P5 / neutral-atom T3): posted writes program two
@@ -17,7 +17,7 @@ import riscq.soc.link.RfCmd
 object TimedDioSim extends App {
   case class Dut() extends Component {
     val dio = TimedDio(slots = 4)
-    val cmd  = slave port Flow(RfCmd(16))
+    val cmd  = slave port Flow(Put(16))
     val time = in port UInt(32 bits)
     val dout = out port Bits(16 bits)
     val din  = in port Bits(16 bits)

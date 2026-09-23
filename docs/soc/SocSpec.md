@@ -68,7 +68,7 @@ node from 16 up is a system unit for the board hub — [specs/cross-core/02](../
 `SocMap.sinks(core)`, which emits `RQ_SINK_<NAME>` into `riscq_map.h`.
 
 `software/tests/test_spec_scala.py` diffs `PrintSocMap`'s JSON (entries, per-core channel tables,
-`rf_addr_width`, `dac_pipe`) against `riscq.map.SocMap` for all **8** configs — the five qubit builds plus
+`put_addr_width`, `dac_pipe`) against `riscq.map.SocMap` for all **8** configs — the five qubit builds plus
 `sim-mm`, `x6y3-multimode` and `sim-dio`.
 
 ```bash
@@ -87,6 +87,6 @@ The qubit builds' addresses and netlist are unchanged throughout.
 ## Related
 
 - [PulseTableSoc](PulseTableSoc.md) (the host regions) · [RiscqRfWithPulseTableFiber](RiscqRfWithPulseTableFiber.md)
-  (the per-core channels) · [RfLink](RfLink.md) (the demux) · [Zcu216Top](Zcu216Top.md) (the board ports)
+  (the per-core channels) · [PutLink](PutLink.md) (the demux) · [Zcu216Top](Zcu216Top.md) (the board ports)
 - Channel kinds: [RfChannels](RfChannels.md) · [TimedDio](TimedDio.md); sinks: [EventLink](EventLink.md)
 - specs/universal-control/01 — the refactor plan

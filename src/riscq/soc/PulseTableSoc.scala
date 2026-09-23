@@ -11,7 +11,7 @@ import spinal.lib.bus.misc.SizeMapping
 import riscq.dsp.{AdderTree, ComplexBatch}
 import riscq.riscv.RiscqParam
 import riscq.soc.fabric.{BramFiber, MemMapDriverFiber}
-import riscq.soc.link.{HostWindowFunnel, PutHub, EventLink, RfCmd}
+import riscq.soc.link.{HostWindowFunnel, PutHub, EventLink, Put}
 import riscq.soc.spec.{CoreSpec, SocSpec, SocSpecMap}
 import riscq.misc.BUFG
 import riscq.wr.WrNode
@@ -183,13 +183,13 @@ class PulseTableSoc(
     riscqCores.foreach(_.riscvSoc.addAttribute("KEEP_HIERARCHY", "TRUE"))
 
     // ── the board hub (specs/cross-core/02 §4): every core's system puts in, one ordered broadcast
-    // out, replicated per core (valid gated by that core's mask bit) and piped like the RF link. It
+    // out, replicated per core (valid gated by that core's mask bit) and piped like the down-link. It
     // lives in riscqCd so a run boundary (riscqReset) clears its boards, barrier counts and flags.
     val hub = riscqCd(PutHub(cores = qubitNum, board = spec.board, boards = spec.boards))
     for ((core, i) <- riscqCores.zipWithIndex) hub.in(i) << core.xput
     hub.time := RegNext(syncTime(0, 32 bits))
     for ((core, i) <- riscqCores.zipWithIndex) {
-      val mine = Flow(RfCmd(EventLink.inboxAddrWidth))
+      val mine = Flow(Put(EventLink.inboxAddrWidth))
       mine.valid   := hub.out.valid && hub.out.payload.mask(i)
       mine.payload := hub.out.payload.put
       core.hubIn << core.getPipe(mine, linkPipe)

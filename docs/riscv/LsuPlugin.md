@@ -72,7 +72,7 @@ funct3's low bits pick a 1/2/4-byte mask; a store shifts its bytes/mask into the
 load reads the whole word, shifts the addressed bytes down, then sign/zero-extends per funct3.
 Misaligned access is out of scope — RV32I requires natural alignment and the tests obey it. The bus
 stays XLEN(32)-wide regardless of how narrow the fetch PC becomes, since `rs1+imm` can point anywhere
-in the SoC map (RF window, readout, data RAM).
+in the SoC map (put window, readout, data RAM).
 
 ## Latency / timing
 

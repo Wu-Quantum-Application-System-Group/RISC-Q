@@ -19,16 +19,16 @@ and in the dummy floorplan harnesses ([floorplan-harnesses](floorplan-harnesses.
 ## Role in the system
 
 ```
-        batch time                 posted RF writes
-   time ─┐                              cmd : master Flow(RfCmd) ─────────► DSP datapath (parent)
+        batch time                 posted writes
+   time ─┐                              cmd : master Flow(Put) ─────────► DSP datapath (parent)
          │                              hostCmd : master Stream(HostCmd) ─► host window (parent)
          │                              done : out Bool ─────────────────► host DONE word (parent)
-         ▼                                               ◄───────── resultIn : slave Flow(RfCmd)
+         ▼                                               ◄───────── resultIn : slave Flow(Put)
   ┌────────────────── RiscvSoc (hard Component, riscqCd) ──────────────────┐
   │  RiscqFiber(core) ── iBus/dBus ─► I/D RAM (Bram|Uram, 2 RW ports)       │
   │                        │                                                │
   │                        ├─► MemMapFiber: TimeMemMap + DoneMemMap + sinks │
-  │                        ├─► RfLinkBridge ─► cmd (out)                     │
+  │                        ├─► PutBridge ─► cmd (out)                     │
   │                        └─► HostWindowBridge ─► hostCmd (out)             │
   │  sinks (one per reporting channel) ◄── resultIn (in)                    │
   └── iLoad (MasterBus slave-IO, dsp clock) ◄── host image load (parent CDC)┘
@@ -71,7 +71,7 @@ Key construction params (`case class RiscvSoc`):
 
 - `plugins`, `riscqCd` — the core's plugin list and its (core-reset) clock domain.
 - `memDepth` / `memWidth` / `memOutReg` / `useUram` — the I/D RAM shape and technology.
-- `rfAddrWidth` (28 = `SocSpecMap.putAddrWidth`) — width of the posted `RfCmd` address, i.e. the size
+- `putAddrWidth` (28 = `SocSpecMap.putAddrWidth`) — width of the posted `Put` address, i.e. the size
   of the core's **put window** at `0x10000`: a store's address is `node · 0x10000 + offset`. Nodes
   `0..15` are this core's own channels (channel `k` = node `k`, one `0x10000` sub-window each —
   [`SocSpecMap`](SocSpec.md)); nodes `≥ 16` are system-wide units the parent routes to the board hub
@@ -91,11 +91,11 @@ Key construction params (`case class RiscvSoc`):
 - `withTestTap` — add the sim-only `dTap` master into the data-bus decode so a testbench can schedule RF
   writes without a CPU program.
 
-IO: `time` (in); `cmd` (master `Flow(RfCmd)`); `hostCmd` (master `Stream(HostCmd)`);
+IO: `time` (in); `cmd` (master `Flow(Put)`); `hostCmd` (master `Stream(HostCmd)`);
 `done` (out `Bool`, the run-completion level — [ControlMemMaps](ControlMemMaps.md));
-`resultIn` (slave `Flow(RfCmd(12))` — the up-link, puts into the inbox, [EventLink](EventLink.md)); `iLoad` and optional `dTap`
-(`MasterBus` slave-IO). The CPU RAM base is `0x80000000`; the RF window, host window, control block and
-sink addresses are decoded off the data bus ([`RfLinkBridge`](RfLinkBridge.md) at `0x10000`,
+`resultIn` (slave `Flow(Put(12))` — the up-link, puts into the inbox, [EventLink](EventLink.md)); `iLoad` and optional `dTap`
+(`MasterBus` slave-IO). The CPU RAM base is `0x80000000`; the put window, host window, control block and
+sink addresses are decoded off the data bus ([`PutBridge`](PutBridge.md) at `0x10000`,
 [`HostWindowBridge`](HostWindow.md) at `0x4000_0000`, the control block at `0`, sink `k` at
 `0x4200 + 0x20·k` — the qubit builds' demod sink giving `res`/`real`/`imag` at `0x4200/4/8`).
 
@@ -104,13 +104,13 @@ sink addresses are decoded off the data bus ([`RfLinkBridge`](RfLinkBridge.md) a
 `RiscvSoc` is exercised end-to-end as part of the SoC sims — the register-driven sign-off
 [`PulseTableSocSim`](PulseTableSoc.md) (drives `dTap`) and the CPU-in-the-loop
 [`PulseTableSocCpuSim`](PulseTableSoc.md). Its constituents are unit-checked on their own:
-[`RfLinkBridge`](RfLinkBridge.md), [`EventLink`](EventLink.md) (`ReadoutResultLinkSim` / `EventSinkSim`),
+[`PutBridge`](PutBridge.md), [`EventLink`](EventLink.md) (`ReadoutResultLinkSim` / `EventSinkSim`),
 [`HostWindowFunnelSim` / `HostWindowCpuSim`](HostWindow.md), [`RamOnFabricSim`](RiscqFiber.md).
 
 ## Related
 
 [RiscqRfWithPulseTableFiber](RiscqRfWithPulseTableFiber.md) · [PulseTableSoc](PulseTableSoc.md) ·
-[RiscqFiber](RiscqFiber.md) · [RfLinkBridge](RfLinkBridge.md) · [EventLink](EventLink.md) ·
+[RiscqFiber](RiscqFiber.md) · [PutBridge](PutBridge.md) · [EventLink](EventLink.md) ·
 [HostWindow](HostWindow.md) ·
 [ControlMemMaps](ControlMemMaps.md) · [floorplan-harnesses](floorplan-harnesses.md) · [ARCH](ARCH.md) ·
 [SOC_TIPS](SOC_TIPS.md)

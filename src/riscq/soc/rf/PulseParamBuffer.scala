@@ -2,7 +2,7 @@ package riscq.soc.rf
 
 import spinal.core._
 import spinal.lib._
-import riscq.soc.link.RfCmd
+import riscq.soc.link.Put
 
 /** One pulse's parameters as stored in the CPU-writable table: raw `Bits` (the PulseGenerator io
  *  flows `assignFromBits` them). `env` is the envelope-memory base address. Each field's width matches
@@ -31,7 +31,7 @@ case class PulseParamBufferParams(
     envAddrWidth: Int = 10,
     durWidth: Int = 16,
     timeWidth: Int = 32,
-    addrWidth: Int = 16,         // RfCmd address width (the buffer's RF sub-window)
+    addrWidth: Int = 16,         // Put address width (the buffer's RF sub-window)
     fireAddr: Int = 0x0,
     freqAddr: Int = 0x4,
     dcOffsetAddr: Int = 0x8,     // per-buffer DC bias for the real output lanes (16-bit field at bit 16)
@@ -55,7 +55,7 @@ case class PulseParamBufferParams(
 
 /**
  * DSP-side register file for one pulse generator — the posted-link register file. It holds the pulse
- * table, `freq`, `startTime` and a local `time` copy, driven by the demuxed **posted** `Flow(RfCmd)`
+ * table, `freq`, `startTime` and a local `time` copy, driven by the demuxed **posted** `Flow(Put)`
  * (no TileLink, no D channel), and emits the parameter `Flow`s + `time`/`startTime` to a sibling
  * [[riscq.dsp.pulse.PulseGenerator]].
  *
@@ -69,7 +69,7 @@ case class PulseParamBuffer(p: PulseParamBufferParams) extends Component {
   val w = dataWidth
 
   val io = new Bundle {
-    val cmd       = slave  port Flow(RfCmd(addrWidth))   // demuxed posted writes for THIS generator
+    val cmd       = slave  port Flow(Put(addrWidth))     // demuxed posted writes for THIS generator
     val timeBcast = in     port UInt(timeWidth bits)     // shared time broadcast (equal delay to all)
     val phase     = master port Flow(SInt(w bits))
     val amp       = master port Flow(SInt(w bits))
@@ -114,7 +114,7 @@ case class PulseParamBuffer(p: PulseParamBufferParams) extends Component {
   // exact-match compare, and the table write is split by address: entry i occupies the 16-byte slot
   // at (i+1)*pulseOffset, so the slot index is address>>4 (one range compare) and the written field
   // is address[3:2] (word offsets +0/+4/+8/+12) — not 4*pulseNum full-address comparators. Upstream
-  // traffic is word-aligned 4-byte Puts (RfLinkBridge), so address[1:0] is always 0. ──
+  // traffic is word-aligned 4-byte Puts (PutBridge), so address[1:0] is always 0. ──
   val addr = cmd.payload.address
   def hit(a: Int): Bool = cmd.valid && addr === a
 

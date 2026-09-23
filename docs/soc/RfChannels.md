@@ -4,7 +4,7 @@
 **Package:** `riscq.soc.rf` · **Type:** trait (`Channel`) + Components
 
 The two self-contained converter-edge boxes the floorplan pins. Each binds a DSP datapath block to a
-DAC/ADC edge and exposes a single CPU-facing input — the demuxed posted `Flow(RfCmd)` plus the shared
+DAC/ADC edge and exposes a single CPU-facing input — the demuxed posted `Flow(Put)` plus the shared
 `time` broadcast — so the core can be floorplanned far from the converters. They are thin wiring: a
 [PulseParamBuffer](PulseParamBuffer.md) driving a [PulseGenerator](../dsp/PulseGenerator.md) — the drive
 channels route the pulse to a DAC, the demod channel routes it to the decoder as the carrier. Every
@@ -20,7 +20,7 @@ naming a kind nowhere but its one `mkChannel` dispatch:
 
 | Member | What |
 |---|---|
-| `cmd: Flow[RfCmd]` | the channel's demuxed posted sub-window (its only CPU-facing input) |
+| `cmd: Flow[Put]` | the channel's demuxed posted sub-window (its only CPU-facing input) |
 | `timeBcast: UInt` | the shared batch-time broadcast |
 | `memPort: Option[MemReadPort[Bits]]` | the envelope-RAM read port — `None` for a kind with no bank |
 | `envLanes: Int` | lanes a stored envelope line expands to (0 = no bank) |
@@ -35,12 +35,12 @@ the shell rather than by the channel, since its source is the decoder the carrie
 ## `PulseDriveChannel` — a gate/readout drive bound to a DAC
 
 ```
-  Flow(RfCmd) ─▶ PulseParamBuffer ─(phase + phaseOffset)─▶ PulseGenerator ─(re + dcOffset)─▶ io.pulse → DAC
+  Flow(Put) ─▶ PulseParamBuffer ─(phase + phaseOffset)─▶ PulseGenerator ─(re + dcOffset)─▶ io.pulse → DAC
   time bcast  ─▶                                                          ─▶ io.memPort (external envelope RAM)
 ```
 
 A [PulseParamBuffer](PulseParamBuffer.md) + a [PulseGenerator](../dsp/PulseGenerator.md) + its
-envelope-RAM read port, packaged into one Component. Its only CPU-facing input is the `RfCmd` Flow; it
+envelope-RAM read port, packaged into one Component. Its only CPU-facing input is the `Put` Flow; it
 emits the DAC `pulse` and forwards an external envelope-memory `MemReadPort` (the host-writable envelope
 RAM lives outside the channel, in [RiscqRfWithPulseTableFiber](RiscqRfWithPulseTableFiber.md)). Used twice
 per qubit core: gate drive (`pulseNum` several) and readout drive (`pulseNum = 1`).
@@ -69,7 +69,7 @@ vs a few percent of post-route fmax). See [QUBIC_DATAPATH_COMPARISON](QUBIC_DATA
 ## `DemodChannel` — the demod carrier
 
 ```
-  Flow(RfCmd) ─▶ PulseParamBuffer ─(phase + phaseOffset)─▶ PulseGenerator ─▶ io.carrier → ReadoutDecoder
+  Flow(Put) ─▶ PulseParamBuffer ─(phase + phaseOffset)─▶ PulseGenerator ─▶ io.carrier → ReadoutDecoder
   time bcast  ─▶                                                          ─▶ io.memPort (external envelope RAM)
 ```
 

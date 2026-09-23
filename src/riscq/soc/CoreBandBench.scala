@@ -4,7 +4,7 @@ import spinal.core._
 import spinal.core.fiber.Fiber
 import spinal.lib._
 import riscq.riscv.RiscqParam
-import riscq.soc.link.{EventLink, RfCmd}
+import riscq.soc.link.{EventLink, Put}
 
 /**
  * Single-core band bench (specs/riscv-fmax.md Phase A2): one [[RiscvSoc]] in the **exact SoC
@@ -76,7 +76,7 @@ case class CoreBandBench(
 
     // ── posted-link boundary: one DONT_TOUCH cmd pipe per channel (gate / readout / demod), each
     //    into a kept accumulator anchor — the SoC's exact `getPipe(riscvSoc.cmd, linkPipe)` fan-out ──
-    def mkAcc(p: Flow[RfCmd]): Bits = {
+    def mkAcc(p: Flow[Put]): Bits = {
       val acc = Reg(Bits(32 bits)) init 0
       acc.addAttribute("DONT_TOUCH")
       when(p.valid)(acc := acc ^ p.payload.data ^ p.payload.address.asBits.resize(32))
@@ -90,7 +90,7 @@ case class CoreBandBench(
     val demodAcc  = mkAcc(demodPipe)
 
     // up-link result back through the registered boundary (exercises the full resultIn width)
-    val res = Flow(RfCmd(EventLink.inboxAddrWidth))   // the up-link: puts into the inbox
+    val res = Flow(Put(EventLink.inboxAddrWidth))   // the up-link: puts into the inbox
     res.valid        := demodPipe.valid && (demodPipe.payload.address === 0x30000)
     res.payload.address := demodAcc(0, EventLink.inboxAddrWidth bits).asUInt
     res.payload.data    := demodAcc

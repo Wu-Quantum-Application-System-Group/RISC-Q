@@ -12,7 +12,7 @@ import riscq.memory.{Bram, HalfUram, Uram}
 import riscq.soc.fabric.{RiscqFiber, TileLinkCpuMemFiber, MemMapFiber}
 import riscq.soc.rf.{TimeMemMap, DoneMemMap}
 import riscq.soc.spec.SocSpecMap
-import riscq.soc.link.{RfLinkBridge, EventLink, EventFifoSink, ReadoutResultSink, LatestSink, MailboxSink, SinkSpec, RfCmd, HostCmd, HostWindowBridge}
+import riscq.soc.link.{PutBridge, EventLink, EventFifoSink, ReadoutResultSink, LatestSink, MailboxSink, SinkSpec, Put, HostCmd, HostWindowBridge}
 
 /**
  * The **timing-critical core unit** carved out of [[RiscqRfWithPulseTableFiber]] for the
@@ -23,7 +23,7 @@ import riscq.soc.link.{RfLinkBridge, EventLink, EventFifoSink, ReadoutResultSink
  *
  * IO boundary — narrow and **registered** on both sides of the posted link:
  *   - `time`                     : shared batch-time broadcast (in);
- *   - `cmd : master Flow(RfCmd)`  : posted RF writes out of the [[RfLinkBridge]] → the DSP datapath;
+ *   - `cmd : master Flow(Put)`   : posted writes out of the [[PutBridge]] → the DSP datapath;
  *   - `hostCmd : master Stream(HostCmd)` : posted result writes out of the [[HostWindowBridge]] → the
  *     clock-crossing FIFO and the shared host-window funnel (specs/software/22; the crossing itself is
  *     in the parent, outside this hard Component);
@@ -53,7 +53,7 @@ case class RiscvSoc(
     memWidth: Int = 32,
     memOutReg: Boolean = true,
     useUram: Boolean = true,
-    rfAddrWidth: Int = SocSpecMap.putAddrWidth,   // the put window (specs/cross-core/02 §3.2)
+    putAddrWidth: Int = SocSpecMap.putAddrWidth,   // the put window (specs/cross-core/02 §3.2)
     hostWinAddrWidth: Int = 24,   // per-core host window (24 ⇒ 16 MB) at `RiscvSoc.hostWinBase`
     // the up-link's core-local sinks (specs/universal-control/01 §2.4), from the core's EventPlan;
     // the default is the qubit build's single readout-result sink at 0x4200 plus the cross-core inbox
@@ -70,8 +70,8 @@ case class RiscvSoc(
 
   // ── IO boundary ──
   val time     = in  port UInt(timeWidth bits)        // shared batch-time broadcast
-  val cmd      = master port Flow(RfCmd(rfAddrWidth)) // posted RF writes (RfLinkBridge) → DSP
-  val resultIn = slave  port Flow(RfCmd(EventLink.inboxAddrWidth)) // the up-link: puts into the inbox (sinks)
+  val cmd      = master port Flow(Put(putAddrWidth)) // posted writes (PutBridge) → DSP
+  val resultIn = slave  port Flow(Put(EventLink.inboxAddrWidth)) // the up-link: puts into the inbox (sinks)
   val hostCmd  = master port Stream(HostCmd(hostWinAddrWidth))    // posted result writes → host window
   val done     = out port Bool()                     // run-completion flag (specs/software/23) → host
 
@@ -156,12 +156,12 @@ case class RiscvSoc(
 
   // ── posted-link bridge + core-local readout-result sink (riscqCd) ──
   val posted = riscqCd { new Composite(this, "posted") {
-    val bridge = RfLinkBridge(rfAddrWidth)
+    val bridge = PutBridge(putAddrWidth)
     // the put window at 0x10000: node · 0x10000 + offset — nodes 0..15 are this core's own channels
     // (one 0x10000 sub-window each, universal-control/01 §2.2), nodes ≥ 16 are system units the parent
     // routes to the hub (specs/cross-core/02 §3.2). The host window at 0x40000000 bounds it at 29 bits.
-    require(rfAddrWidth <= 29, s"rfAddrWidth $rfAddrWidth: the put window would reach the host window")
-    bridge.up at SizeMapping(0x10000, BigInt(1) << rfAddrWidth) of dMemPortDec
+    require(putAddrWidth <= 29, s"putAddrWidth $putAddrWidth: the put window would reach the host window")
+    bridge.up at SizeMapping(0x10000, BigInt(1) << putAddrWidth) of dMemPortDec
     bridge.up.setUpConnection(a = StreamPipe.FULL, d = StreamPipe.FULL)
 
     // write-only host window (specs/software/22): results leave the core here instead of piling up in
@@ -191,7 +191,7 @@ case class RiscvSoc(
     }
   } }
 
-  cmd     << posted.bridge.cmd                      // posted RF writes leave for the DSP datapath
+  cmd     << posted.bridge.cmd                      // posted writes leave for the DSP datapath
   hostCmd << posted.hostWindow.cmd                  // posted result writes leave for the host funnel
 
   // finish the control block: add the local result-sink read map, then connect the bus.

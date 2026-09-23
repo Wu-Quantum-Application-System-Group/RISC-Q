@@ -4,7 +4,7 @@ import spinal.core._
 import spinal.core.sim._
 import spinal.lib._
 import riscq.dsp.SinCosMethod
-import riscq.soc.link.RfCmd
+import riscq.soc.link.Put
 import riscq.soc.rf.PulseDriveChannel
 
 /**
@@ -33,7 +33,7 @@ object PulseDriveChannelSim extends App {
   val durWidth   = 8
   val pulseNum   = 2
   val memLatency = 2
-  val rfAddrWidth = 16
+  val putAddrWidth = 16
   val prescaleAmp = true
   val saturate    = false
 
@@ -50,16 +50,16 @@ object PulseDriveChannelSim extends App {
     word
   }
 
-  /** Test top: one [[PulseDriveChannel]] driven by a poke-able posted `RfCmd` Flow + `timeBcast`, its
+  /** Test top: one [[PulseDriveChannel]] driven by a poke-able posted `Put` Flow + `timeBcast`, its
    *  envelope read port wired to the complex envelope Mem, its DAC `pulse` re-exported. */
   case class Dut() extends Component {
-    val cmd       = slave port Flow(RfCmd(rfAddrWidth))
+    val cmd       = slave port Flow(Put(putAddrWidth))
     val timeBcast = in port UInt(timeWidth bits)
 
     val ch = PulseDriveChannel(
       pulseNum = pulseNum, batchSize = batchSize, dataWidth = w, envAddrWidth = envAddrW,
       durWidth = durWidth, timeWidth = timeWidth, memLatency = memLatency, prescaleAmp = prescaleAmp,
-      saturate = saturate, phasorMethod = SinCosMethod.Cordic, realOutput = false, rfAddrWidth = rfAddrWidth)
+      saturate = saturate, phasorMethod = SinCosMethod.Cordic, realOutput = false, putAddrWidth = putAddrWidth)
     ch.io.cmd << cmd
     ch.io.timeBcast := timeBcast
 
@@ -170,7 +170,7 @@ object PulseDriveChannelSim extends App {
     val trainAt = 100
     val compiledT = SimConfig.compile(Dut())
 
-    // run one timeBcast ramp after `program` posts its RfCmd beats; return the per-cycle capture.
+    // run one timeBcast ramp after `program` posts its Put beats; return the per-cycle capture.
     def captureRun(program: (((Int, Int) => Unit), (Seq[(Int, Int)] => Unit)) => Unit)
         : (Array[Boolean], Array[Array[BigInt]], Array[Array[BigInt]]) = {
       val V  = Array.ofDim[Boolean](totalCycles)

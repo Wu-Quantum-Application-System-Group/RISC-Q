@@ -5,7 +5,7 @@
 
 One per board, in the SoC top outside every core pblock. It is the only place cores meet: every core's
 **system puts** (a store whose node id is ≥ `SocSpecMap.localNodes`, split off the posted link by
-[`RfLink.nonLocal`](RfLink.md)) are arbitrated onto one ordered stream and dispatched by node id into
+[`PutLink.nonLocal`](PutLink.md)) are arbitrated onto one ordered stream and dispatched by node id into
 **re-puts** on one ordered broadcast that every core's inbox listens to
 ([specs/cross-core/02](../../specs/cross-core/02-put-network.md) §4, decisions D3/D4).
 
@@ -21,7 +21,7 @@ One per board, in the SoC top outside every core pblock. It is the only place co
 
 A `HubBeat` is `{mask, put}`: the put (`{offset, data}`, the inbox address form of
 [EventLink](EventLink.md)) and the destination mask, bit *i* = core *i*. The SoC top makes one replica of
-the beat per core with `valid` gated by that core's mask bit, pipes it like the RF link, and hands it to
+the beat per core with `valid` gated by that core's mask bit, pipes it like the down-link, and hands it to
 the core shell's up-link merge as one more source. So a re-put costs one beat whatever its fan-out.
 
 ## Dispatch
@@ -66,7 +66,7 @@ schedules identically everywhere. `PutLaneSim` checks all of this over the real 
 ## Interface & configuration
 
 `PutHub(cores, board = 0, boards = 1, addrWidth = putAddrWidth, groups = groupNodes, barrierIds =
-barrierIds, queueDepth = 8, releaseSlack = 0)` — `in: Vec(Flow(RfCmd))` one per core, `laneIn:
+barrierIds, queueDepth = 8, releaseSlack = 0)` — `in: Vec(Flow(Put))` one per core, `laneIn:
 Flow(PutFrame)` / `laneOut: Stream(PutFrame)` (tied off on a one-board build), `time: UInt(32)` (a
 local replica of `syncTime`), `out: Flow(HubBeat)`, `countMismatch: Bool`. `releaseSlack` is added to the stamped time; it
 stays 0 because software adds `LEAD` to the returned `t0` before scheduling, and `LEAD`'s margin covers
@@ -114,6 +114,6 @@ mill runMain riscq.soc.sim.PutLaneSim
 
 ## Related
 
-[EventLink](EventLink.md) (the inbox kinds it writes: `latest`, `mailbox`) · [RfLink](RfLink.md)
+[EventLink](EventLink.md) (the inbox kinds it writes: `latest`, `mailbox`) · [PutLink](PutLink.md)
 (`nonLocal`) · [RiscvSoc](RiscvSoc.md) · [PulseTableSoc](PulseTableSoc.md) ·
 [specs/cross-core/02](../../specs/cross-core/02-put-network.md)

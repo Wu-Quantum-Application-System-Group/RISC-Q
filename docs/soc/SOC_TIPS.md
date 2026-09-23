@@ -302,7 +302,7 @@ CPU is the sole `dBus` master). Mechanics that bit:
   `time + 3 < timeCmp`. On the shot where `t_ro + tail` crosses 2^32 while `time` has not, `timeCmp` is
   tiny and the halt releases at once — for up to one grid period every `wait_until` is a no-op, the CPU
   runs the shot loop flat out, its pulse posts overflow the depth-4 `TimedQueue`s down the no-back-pressure
-  RF `Flow` (dropped, never played) and `read_real/imag` return the latest-value sink's last real shot every
+  `Flow(Put)` (dropped, never played) and `read_real/imag` return the latest-value sink's last real shot every
   iteration. When `time` wraps too the compare works again, the CPU waits out the lead it built up, and
   the run finishes normally. *Fix:* the halt is now the signed distance `(timeCmp − (time + 3)).asSInt > 0`
   (`ControlMemMaps.scala`), wrap-safe within ±2^31 like the `TimedQueue` test above; `ControlMapFiberSim`

@@ -11,7 +11,7 @@ happened at.
 ## Role in the system
 
 ```
-  Flow(RfCmd) ─▶ PulseParamBuffer ─{mask, value}@startTime─▶ TimedQueue ─▶ (out & ~mask)|(value & mask) ─▶ io.dout → board
+  Flow(Put) ─▶ PulseParamBuffer ─{mask, value}@startTime─▶ TimedQueue ─▶ (out & ~mask)|(value & mask) ─▶ io.dout → board
   time bcast  ─▶                                                                                          16 lines
   board → io.din ─▶ edge detect ─▶ io.event {changed, levels} + io.eventTime ─▶ EventFifoSink (the core's `fifo` sink)
 ```

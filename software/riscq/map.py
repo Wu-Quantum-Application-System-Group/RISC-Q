@@ -120,12 +120,12 @@ class SocMap:
     CTRL_IMAG = 0x4208
     CTRL_TIME = 0xBFF8
 
-    # ── RF window (CPU addresses): the RfLinkBridge sits at RF_WINDOW; channel k of a core owns the
-    # sub-window RF_WINDOW + k * RF_CH_STRIDE (RfLink.demux in the core shell). The qubit builds list
+    # ── channel windows (CPU addresses): the PutBridge sits at PUT_WINDOW; channel k of a core owns the
+    # sub-window PUT_WINDOW + k * RF_CH_STRIDE (PutLink.demux in the core shell). The qubit builds list
     # gate / ro / demod, so the role aliases below still hold there; 0x40000 stays unmapped on them. ──
-    RF_WINDOW = 0x10000
+    PUT_WINDOW = 0x10000
     RF_CH_STRIDE = 0x10000
-    # ── the put window (specs/cross-core/02 §3.2): a store's address is RF_WINDOW + node * 2^16 + offset.
+    # ── the put window (specs/cross-core/02 §3.2): a store's address is PUT_WINDOW + node * 2^16 + offset.
     # Nodes 0..LOCAL_NODES-1 are the core's own channels (node k = channel k, hence RF_CH_STRIDE); every
     # node from LOCAL_NODES up is a system unit routed to the board hub. Mirrors SocSpecMap.
     NODE_BITS = 12
@@ -302,8 +302,8 @@ class SocMap:
         return self.rob_base
 
     # ── per-core channel table (spec 02 §3.2) ──
-    def rf_addr_width(self, core: int = 0) -> int:
-        """Width of the core's put window (the RfLinkBridge's rfAddrWidth): 16 + NODE_BITS."""
+    def put_addr_width(self, core: int = 0) -> int:
+        """Width of the core's put window (the PutBridge's putAddrWidth): 16 + NODE_BITS."""
         assert len(self.params.core(core).channels) <= self.LOCAL_NODES
         return 16 + self.NODE_BITS
 
@@ -315,7 +315,7 @@ class SocMap:
     def node_addr(self, node: int, offset: int = 0) -> int:
         """CPU address of `offset` within system node `node` (node >= LOCAL_NODES)."""
         assert self.LOCAL_NODES <= node < (1 << self.NODE_BITS)
-        return self.RF_WINDOW + (node << 16) + offset
+        return self.PUT_WINDOW + (node << 16) + offset
 
     def channels(self, core: int = 0) -> list[ChannelInfo]:
         """The core's channels in list order, indexed by the ParamTable `channel` field. On the
@@ -324,7 +324,7 @@ class SocMap:
         readout decoder; its carrier freq is set separately via set_freq with an ADC-rate
         demod_freq_to_code code)."""
         cs = self.params.core(self._core(core))
-        return [ChannelInfo(i, f"RF_CH{i}", self.RF_WINDOW + i * self.RF_CH_STRIDE, ch.slots,
+        return [ChannelInfo(i, f"RF_CH{i}", self.PUT_WINDOW + i * self.RF_CH_STRIDE, ch.slots,
                             ch.samples_per_line, ch.line_bytes, core=core, name=ch.name,
                             kind=ch.kind, env_depth=ch.env_depth, lanes=ch.lanes,
                             dac=ch.dac, adc=ch.adc)
@@ -464,7 +464,7 @@ class SocMap:
             ("RQ_SLOT_STRIDE", self.RF_SLOT_STRIDE), ("RQ_START_TIME", self.RF_START_TIME),
             ("RQ_HOSTWIN", self.HOSTWIN), ("RQ_HOSTWIN_BYTES", self.HOSTWIN_BYTES),
             # the put network (specs/cross-core/02 §8.1): system nodes and the cross-core inbox
-            ("RQ_RF_WINDOW", self.RF_WINDOW), ("RQ_GROUP_NODE0", self.GROUP_NODE0),
+            ("RQ_PUT_WINDOW", self.PUT_WINDOW), ("RQ_GROUP_NODE0", self.GROUP_NODE0),
             ("RQ_BARRIER_NODE0", self.BARRIER_NODE0), ("RQ_INBOX_NODE0", self.INBOX_NODE0),
             ("RQ_GROUPS", self.GROUP_NODES), ("RQ_BARRIER_IDS", self.BARRIER_IDS),
             ("RQ_INBOX_BOARD", self.INBOX_BOARD), ("RQ_INBOX_RELEASE", self.INBOX_RELEASE),

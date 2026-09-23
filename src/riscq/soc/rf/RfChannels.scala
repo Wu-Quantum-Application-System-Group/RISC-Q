@@ -4,12 +4,12 @@ import spinal.core._
 import spinal.lib._
 import riscq.dsp.{Complex, ComplexBatch, SinCosMethod}
 import riscq.dsp.pulse.{PulseGenerator, PulseGeneratorAligned, PulseGeneratorParams}
-import riscq.soc.link.RfCmd
+import riscq.soc.link.Put
 
 /**
  * Converter-edge **pulse-drive channel** — the self-contained box the floorplan pins: a
- * [[PulseParamBuffer]] (DSP-side register file, driven by the demuxed posted `Flow(RfCmd)`) + a
- * [[PulseGenerator]] + its envelope-RAM read port. Its only CPU-facing input is the `RfCmd` Flow (plus
+ * [[PulseParamBuffer]] (DSP-side register file, driven by the demuxed posted `Flow(Put)`) + a
+ * [[PulseGenerator]] + its envelope-RAM read port. Its only CPU-facing input is the `Put` Flow (plus
  * the shared `time` broadcast); it emits the DAC `pulse` and an external envelope-memory `MemReadPort`.
  * The buffer's memory-mapped `phaseOffset` (virtual Z) is added combinationally to the generator's
  * phase input — the phase Flow stays cycle-aligned with amp/addr/dur, and the add wraps modulo 2^w,
@@ -30,14 +30,14 @@ case class PulseDriveChannel(
     phasorMethod: SinCosMethod,
     realOutput: Boolean,
     queueDepth: Int = 4,          // per-parameter TimedQueue depth (scheduled-ahead pulses per param)
-    rfAddrWidth: Int = 16,
+    putAddrWidth: Int = 16,
     useAligned: Boolean = false   // false = per-parameter lead-time TimedQueues (PulseGenerator);
                                   // true = QubiC-style single combined params FIFO + SRL alignment
                                   // (PulseGeneratorAligned). Bit-identical pulse; trades alignment HW.
 ) extends Component with Channel {
   val N = batchSize; val w = dataWidth
   val io = new Bundle {
-    val cmd       = slave  port Flow(RfCmd(rfAddrWidth))
+    val cmd       = slave  port Flow(Put(putAddrWidth))
     val timeBcast = in     port UInt(timeWidth bits)
     val memPort   = master port MemReadPort(Bits(N * 2 * w bits), envAddrWidth)
     val pulse     = master port Flow(ComplexBatch(N, w))
@@ -47,7 +47,7 @@ case class PulseDriveChannel(
 
   val buf = PulseParamBuffer(PulseParamBufferParams(
     pulseNum = pulseNum, dataWidth = w, envAddrWidth = envAddrWidth, durWidth = durWidth,
-    timeWidth = timeWidth, addrWidth = rfAddrWidth))
+    timeWidth = timeWidth, addrWidth = putAddrWidth))
   buf.io.cmd << io.cmd
   buf.io.timeBcast := io.timeBcast
 
@@ -136,11 +136,11 @@ case class DemodChannel(
     saturate: Boolean,
     phasorMethod: SinCosMethod,
     queueDepth: Int = 4,          // per-parameter TimedQueue depth (scheduled-ahead pulses per param)
-    rfAddrWidth: Int = 16
+    putAddrWidth: Int = 16
 ) extends Component with Channel {
   val N = batchSize; val w = dataWidth
   val io = new Bundle {
-    val cmd       = slave  port Flow(RfCmd(rfAddrWidth))
+    val cmd       = slave  port Flow(Put(putAddrWidth))
     val timeBcast = in     port UInt(timeWidth bits)
     val memPort   = master port MemReadPort(Bits(N * 2 * w bits), envAddrWidth)
     val carrier   = master port Flow(ComplexBatch(N, w))
@@ -150,7 +150,7 @@ case class DemodChannel(
 
   val buf = PulseParamBuffer(PulseParamBufferParams(
     pulseNum = pulseNum, dataWidth = w, envAddrWidth = envAddrWidth, durWidth = durWidth,
-    timeWidth = timeWidth, addrWidth = rfAddrWidth))
+    timeWidth = timeWidth, addrWidth = putAddrWidth))
   buf.io.cmd << io.cmd
   buf.io.timeBcast := io.timeBcast
 

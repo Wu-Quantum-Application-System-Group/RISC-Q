@@ -7,7 +7,7 @@ import spinal.lib.bus.misc.SingleMapping
 import riscq.soc.spec.CoreSpec
 
 /**
- * The **up-link** (DSP → core): one narrow posted `Flow(RfCmd)` per core — **puts into the core's
+ * The **up-link** (DSP → core): one narrow posted `Flow(Put)` per core — **puts into the core's
  * inbox** (specs/cross-core/02 §3.3). A channel's report is serialised into one or more 32-bit word
  * writes at the offsets of its sink's register window, so the core-side end is a plain address decode
  * into the same registers the CPU reads; nothing on the link is typed. The address is the offset from
@@ -79,7 +79,7 @@ object EventLink {
    * cycle, a disabled word skipped. Back-pressure only stalls the walk; a beat into a full event queue
    * is dropped (posted semantics; FIFO sinks expose it as a `seq` gap).
    */
-  def serialize(src: EventSource, sink: SinkSpec, queueDepth: Int = 4): Stream[RfCmd] = new Composite(src.data, "serialize") {
+  def serialize(src: EventSource, sink: SinkSpec, queueDepth: Int = 4): Stream[Put] = new Composite(src.data, "serialize") {
     val dataW = src.data.payload.getWidth
     val timeW = src.time.map(_.getWidth).getOrElse(0)
     val ev = Stream(Bits(dataW + timeW bits))
@@ -108,7 +108,7 @@ object EventLink {
     val idx  = Reg(UInt(log2Up(words.length) bits)) init 0
     val last = idx === words.length - 1
 
-    val out = Stream(RfCmd(inboxAddrWidth))
+    val out = Stream(Put(inboxAddrWidth))
     out.valid           := q.valid && enV(idx)
     out.payload.address := offV(idx)
     out.payload.data    := datV(idx)
@@ -117,15 +117,15 @@ object EventLink {
     q.ready := advance && last
   }.out
 
-  /** Merge the reporters' put streams onto the one up-link `Flow(RfCmd)`: one reporter is its serialiser
+  /** Merge the reporters' put streams onto the one up-link `Flow(Put)`: one reporter is its serialiser
     * alone; several share a round-robin arbiter (a put is self-contained, so no lock is needed). */
   def merge(sources: Seq[EventSource], sinks: Seq[SinkSpec], queueDepth: Int = 4,
-            extra: Seq[Stream[RfCmd]] = Nil): Flow[RfCmd] = {
+            extra: Seq[Stream[Put]] = Nil): Flow[Put] = {
     require(sources.length == sinks.length, "one sink per reporter")
     val streams = sources.zip(sinks).map { case (s, sk) => serialize(s, sk, queueDepth) } ++ extra
     val merged  = if (streams.length == 1) streams.head else StreamArbiterFactory().roundRobin.noLock.on(streams)
     merged.ready := True
-    val out = Flow(RfCmd(inboxAddrWidth))
+    val out = Flow(Put(inboxAddrWidth))
     out.valid   := merged.valid
     out.payload := merged.payload
     out
@@ -161,7 +161,7 @@ case class EventPlan(spec: CoreSpec, readoutAccWidth: Int = 32, groups: Int = ri
 
 /** The address decode every sink shares: `mine` for a put into this sink's `0x20` window, `word` its
   * word index. */
-private[link] class InboxWindow(resultIn: Flow[RfCmd], base: Int) {
+private[link] class InboxWindow(resultIn: Flow[Put], base: Int) {
   private val off = EventLink.inboxOffset(SinkSpec("", "", 0, base, 0))
   require(off % EventLink.sinkStride == 0)
   val mine = resultIn.valid && (resultIn.payload.address >> 5) === (off >> 5)
@@ -182,7 +182,7 @@ private[link] class InboxWindow(resultIn: Flow[RfCmd], base: Int) {
  * has dropped, so the halting read can only return the new window (`specs/new-readout-decoder` §2.4).
  */
 case class ReadoutResultSink(accWidth: Int, base: Int = EventLink.sinkBase) extends Area {
-  val resultIn = Flow(RfCmd(EventLink.inboxAddrWidth))
+  val resultIn = Flow(Put(EventLink.inboxAddrWidth))
   val in = new InboxWindow(resultIn, base)
 
   val valid = Reg(Bool()) init False
@@ -218,7 +218,7 @@ case class ReadoutResultSink(accWidth: Int, base: Int = EventLink.sinkBase) exte
  */
 case class EventFifoSink(dataWidth: Int, base: Int, depth: Int = 8, timeWidth: Int = 32) extends Area {
   require(dataWidth <= 96, "an event sink serves at most three data words")
-  val resultIn = Flow(RfCmd(EventLink.inboxAddrWidth))
+  val resultIn = Flow(Put(EventLink.inboxAddrWidth))
   val in = new InboxWindow(resultIn, base)
 
   case class Entry() extends Bundle {
@@ -272,7 +272,7 @@ case class EventFifoSink(dataWidth: Int, base: Int, depth: Int = 8, timeWidth: I
  */
 case class LatestSink(words: Int, base: Int) extends Area {
   require(words <= 8, "a latest sink is one 0x20 window")
-  val resultIn = Flow(RfCmd(EventLink.inboxAddrWidth))
+  val resultIn = Flow(Put(EventLink.inboxAddrWidth))
   val in = new InboxWindow(resultIn, base)
   val regs = Vec(Reg(Bits(32 bits)) init 0, words)
   for (i <- 0 until words) when(in.mine && in.word === i)(regs(i) := in.data)
@@ -287,7 +287,7 @@ case class LatestSink(words: Int, base: Int) extends Area {
  * address says who) are this kind. A second put before the read overwrites the word; the flag stays.
  */
 case class MailboxSink(base: Int) extends Area {
-  val resultIn = Flow(RfCmd(EventLink.inboxAddrWidth))
+  val resultIn = Flow(Put(EventLink.inboxAddrWidth))
   val in = new InboxWindow(resultIn, base)
   val data = Reg(Bits(32 bits)) init 0
   val full = Reg(Bool()) init False

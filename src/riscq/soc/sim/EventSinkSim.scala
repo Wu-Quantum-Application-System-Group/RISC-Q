@@ -9,12 +9,12 @@ import spinal.lib.bus.tilelink.fabric.MasterBus
 import spinal.lib.bus.tilelink.sim.{IdAllocator, IdCallback, MasterAgent}
 import spinal.lib.bus.misc.SizeMapping
 import riscq.soc.fabric.MemMapFiber
-import riscq.soc.link.{EventFifoSink, EventLink, EventSource, ReadoutResultSink, RfLink, SinkSpec}
+import riscq.soc.link.{EventFifoSink, EventLink, EventSource, ReadoutResultSink, PutLink, SinkSpec}
 
 /**
  * Sign-off for the generic up-link (specs/universal-control/01 §2.4 / P4): two reporters — a
  * `result`-kind source (settled/cleared beats, as the readout decoder emits) and a `fifo`-kind source
- * (edge-like events with a cause time) — are serialised into puts and share one `Flow(RfCmd)` through
+ * (edge-like events with a cause time) — are serialised into puts and share one `Flow(Put)` through
  * [[EventLink.merge]] and `linkPipe` stages into their two core-side sinks. Asserts:
  *
  *   - the FIFO sink's `pop` read HALTS until an event is queued, returns the event's first data word
@@ -53,7 +53,7 @@ object EventSinkSim extends App {
     val resSrc = EventLink.resultSource(resValid, resSign, resReal, resImag, accWidth)
     val evFlow = Flow(Bits(32 bits)); evFlow.valid := evValid; evFlow.payload := evData
     val evSrc  = EventSource(EventLink.fifoKind, evFlow, Some(evTime))
-    val up     = RfLink.pipe(EventLink.merge(Seq(resSrc, evSrc), Seq(resSpec, fifoSpec)), linkPipe)
+    val up     = PutLink.pipe(EventLink.merge(Seq(resSrc, evSrc), Seq(resSpec, fifoSpec)), linkPipe)
 
     val resultSink = ReadoutResultSink(accWidth, base = resSpec.base)
     val fifoSink   = EventFifoSink(fifoSpec.dataWidth, base = fifoSpec.base, depth = 8)

@@ -8,13 +8,13 @@ import riscq.soc.spec.SocSpecMap
   * destination `mask` (bit i = core i) the parent's per-core replica gates `valid` with. */
 case class HubBeat(cores: Int) extends Bundle {
   val mask = Bits(cores bits)
-  val put  = RfCmd(EventLink.inboxAddrWidth)
+  val put  = Put(EventLink.inboxAddrWidth)
 }
 
 /**
  * The board hub (specs/cross-core/02 §4–§5, decisions D3/D4): one per board, in the parent outside
  * every core pblock. It arbitrates the cores' **non-local puts** (node ≥ `SocSpecMap.localNodes`, see
- * [[RfLink.nonLocal]]) and the puts arriving over the **lane** from the other board onto one ordered
+ * [[PutLink.nonLocal]]) and the puts arriving over the **lane** from the other board onto one ordered
  * stream of [[PutFrame]]s and dispatches each by node id:
  *
  *   - **group `g`** (`SocSpecMap.groupNode(g)`): the put's data is `{slot, bit}`; the hub keeps a copy
@@ -57,7 +57,7 @@ case class PutHub(
 ) extends Area {
   require(boards >= 1 && board < boards && boards <= 16 && cores <= 16, "≤ 16 boards of ≤ 16 cores")
   val isRoot = board == 0
-  val in      = Vec(Flow(RfCmd(addrWidth)), cores)  // per-core non-local puts (piped by the parent)
+  val in      = Vec(Flow(Put(addrWidth)), cores)     // per-core non-local puts (piped by the parent)
   val laneIn  = Flow(PutFrame())                     // frames from the other board(s)
   val laneOut = Stream(PutFrame())                   // frames to the other board(s)
   val time    = UInt(32 bits)                        // the batch time (a local replica of syncTime)

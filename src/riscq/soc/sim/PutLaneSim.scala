@@ -3,7 +3,7 @@ package riscq.soc.sim
 import spinal.core._
 import spinal.core.sim._
 import spinal.lib._
-import riscq.soc.link.{EventLink, PutFrame, PutHub, PutLane, RfCmd}
+import riscq.soc.link.{EventLink, PutFrame, PutHub, PutLane, Put}
 import riscq.soc.spec.SocSpecMap
 
 import scala.collection.mutable.ArrayBuffer
@@ -30,7 +30,7 @@ object PutLaneSim extends App {
     val rxCd  = ClockDomain.external("rx", config = ClockDomainConfig(resetKind = BOOT))
     val hubs  = Seq(PutHub(cores = cores, board = 0, boards = 2), PutHub(cores = cores, board = 1, boards = 2))
     val lanes = Seq.fill(2)(PutLane(refCd, rxCd, clockDomain, calThreshLog2 = 8))
-    val puts  = Vec(Vec(slave port Flow(RfCmd(SocSpecMap.putAddrWidth)), cores), 2)
+    val puts  = Vec(Vec(slave port Flow(Put(SocSpecMap.putAddrWidth)), cores), 2)
     val time  = Vec(in port UInt(32 bits), 2)
     val bcast = Vec(master port cloneOf(hubs(0).out), 2)
     for (i <- 0 until 2) {

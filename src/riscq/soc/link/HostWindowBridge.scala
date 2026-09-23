@@ -20,12 +20,12 @@ case class HostCmd(offsetWidth: Int) extends Bundle {
 }
 
 /**
- * Core-side write-only funnel into the **host window** — the twin of [[RfLinkBridge]] for results
+ * Core-side write-only funnel into the **host window** — the twin of [[PutBridge]] for results
  * headed at the PS DDR4 (specs/software/22). A tiny TileLink slave mapped over the core's 16 MB window
  * (`0x4000_0000` in `RiscvSoc.dMemPortDec`): every accepted `Put` becomes exactly one ordered
  * `Stream(HostCmd)` beat that a clock-crossing FIFO carries to the shared [[HostWindowFunnel]].
  *
- * Three differences from [[RfLinkBridge]], all forced by the far side being real memory:
+ * Three differences from [[PutBridge]], all forced by the far side being real memory:
  *
  *   - **`Stream`, not `Flow`.** DDR refresh, Linux traffic on the HP port and the `enable` gate can all
  *     stall the far side, so the AccessAck is issued only when the command is *accepted*: a full FIFO

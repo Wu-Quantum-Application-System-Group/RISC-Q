@@ -5,7 +5,7 @@ import spinal.core.sim._
 import spinal.lib._
 import riscq.dsp._
 import riscq.dsp.pulse.{ReadoutDecoder, ReadoutDecoderParams}
-import riscq.soc.link.RfCmd
+import riscq.soc.link.Put
 import riscq.soc.rf.DemodChannel
 
 import scala.collection.mutable
@@ -28,7 +28,7 @@ import scala.collection.mutable
  * in-window batches, pairing `adc[St+i]` with `carrier[St+i]` at the same cycle (no arm, no decoder
  * `io.time`). A +1-shifted-window cross-check confirms the alignment is sharp.
  *
- * The demod channel is driven exactly as software drives it: posted `RfCmd`s program the buffer
+ * The demod channel is driven exactly as software drives it: posted `Put`s program the buffer
  * (startTime / freq / table[slot] / fire); firing the demod at `St` for `dur` batches **is** the
  * readout — there is no separate decoder arm, and the window is the demod pulse (no +2 padding, since
  * outside the window the generator zeroes its output and the carrier `valid` is low, so the decoder
@@ -44,7 +44,7 @@ object DemodDecoderSim extends App {
   val accWidth   = 32
   val pulseNum   = 2
   val memLatency = 2
-  val rfAddrWidth = 16
+  val putAddrWidth = 16
 
   val amax  = (BigInt(1) << (w - 1)) - 1
   val maskW = BigInt(1) << w
@@ -70,13 +70,13 @@ object DemodDecoderSim extends App {
     signedW(uMod(tpLow + phase, maskW))
   }
 
-  /** Test top: DemodChannel (poke-able posted RfCmd + timeBcast) with a preloaded envelope Mem, feeding
+  /** Test top: DemodChannel (poke-able posted Put + timeBcast) with a preloaded envelope Mem, feeding
    *  a carrier-triggered ReadoutDecoder. The carrier `Flow` (valid + payload) is connected straight to
    *  the decoder — no stage — so the decoder integrates the carrier's in-window batches at the very
    *  cycle they are emitted, pairing them with the live `adc` of the same cycle. */
   case class Tb(prescaleAmp: Boolean, saturate: Boolean) extends Component {
     val io = new Bundle {
-      val cmd       = slave port Flow(RfCmd(rfAddrWidth))
+      val cmd       = slave port Flow(Put(putAddrWidth))
       val time      = in    port UInt(timeWidth bits)
       val adc       = in    port ComplexBatch(N, w)
       val real      = out   port SInt(accWidth bits)
@@ -86,7 +86,7 @@ object DemodDecoderSim extends App {
     }
     val demod = DemodChannel(pulseNum = pulseNum, batchSize = N, dataWidth = w, envAddrWidth = envAddrW,
       durWidth = durWidth, timeWidth = timeWidth, memLatency = memLatency, prescaleAmp = prescaleAmp,
-      saturate = saturate, phasorMethod = SinCosMethod.Cordic, rfAddrWidth = rfAddrWidth)
+      saturate = saturate, phasorMethod = SinCosMethod.Cordic, putAddrWidth = putAddrWidth)
     demod.io.cmd << io.cmd
     demod.io.timeBcast := io.time
     val mem = Mem.fill(content.length)(Bits(N * 2 * w bits)) init (content.map(c => B(c, N * 2 * w bits)))
@@ -176,7 +176,7 @@ object DemodDecoderSim extends App {
       val amp = 9000; val freq = 1800; val phase = 3000; val base = 10; val slot = 0
       val totalCycles = 220
 
-      // posted demod-buffer writes, scheduled well before St (lead-time queues pop early). One RfCmd per
+      // posted demod-buffer writes, scheduled well before St (lead-time queues pop early). One Put per
       // cycle, mirroring the software order: startTime, freq, table[slot] (phase/amp/env/dur), fire.
       val fireC = St - 60
       val prog = mutable.Map[Int, (Int, Int)]()  // cycle -> (addr, data)

@@ -66,7 +66,7 @@ def line(cfg, q: int, name: str, m) -> ChannelInfo:
 
 
 # ── deep-gate-train pacing (spec 14 F1) ──
-# Every PulseGenerator parameter sits behind a depth-4 TimedQueue on the posted RF link, and a push
+# Every PulseGenerator parameter sits behind a depth-4 TimedQueue on the posted link, and a push
 # into a FULL queue is silently DROPPED (no backpressure reaches the core), so a train may never have
 # more than TRAIN_AHEAD gates scheduled ahead of the one now playing. An UNPACED train therefore
 # plays its first 4 gates and drops every one after — measured in co-sim, exactly 4 of 96.

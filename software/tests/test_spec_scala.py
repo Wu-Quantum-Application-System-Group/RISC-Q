@@ -36,7 +36,7 @@ def _python_map(config: Path) -> dict:
                        "slots": c.slot_count, "samples_per_line": c.samples_per_line,
                        "line_bytes": c.line_bytes, "dac": c.dac, "adc": c.adc}
                       for c in m.channels(core)] for core in range(len(m.params.cores))],
-        "rf_addr_width": [m.rf_addr_width(core) for core in range(len(m.params.cores))],
+        "put_addr_width": [m.put_addr_width(core) for core in range(len(m.params.cores))],
         "dac_pipe": m.dac_pipe(0),
     }
 

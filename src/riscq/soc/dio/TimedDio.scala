@@ -4,7 +4,7 @@ import spinal.core._
 import spinal.lib._
 import riscq.dsp.Complex
 import riscq.dsp.pulse.TimedQueue
-import riscq.soc.link.{EventLink, EventSource, RfCmd}
+import riscq.soc.link.{EventLink, EventSource, Put}
 import riscq.soc.rf.{Channel, PulseParamBuffer, PulseParamBufferParams}
 
 /**
@@ -29,11 +29,11 @@ case class TimedDio(
     timeWidth: Int = 32,
     durWidth: Int = 16,
     queueDepth: Int = 4,
-    rfAddrWidth: Int = 16
+    putAddrWidth: Int = 16
 ) extends Component with Channel {
   val lines = 16                      // the buffer's 16-bit mask/value fields
   val io = new Bundle {
-    val cmd       = slave port Flow(RfCmd(rfAddrWidth))
+    val cmd       = slave port Flow(Put(putAddrWidth))
     val timeBcast = in    port UInt(timeWidth bits)
     val dout      = out   port Bits(lines bits)
     val din       = in    port Bits(lines bits)
@@ -46,7 +46,7 @@ case class TimedDio(
 
   val buf = PulseParamBuffer(PulseParamBufferParams(
     pulseNum = slots, dataWidth = lines, envAddrWidth = 1, durWidth = durWidth,
-    timeWidth = timeWidth, addrWidth = rfAddrWidth))
+    timeWidth = timeWidth, addrWidth = putAddrWidth))
   buf.io.cmd << io.cmd
   buf.io.timeBcast := io.timeBcast
 

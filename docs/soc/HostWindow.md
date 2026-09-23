@@ -13,7 +13,7 @@ with a numpy view of one contiguous CMA buffer. The design of record is
 and not the PL DDR4 (§1).
 
 This is deliberately **not a DMA engine**: no descriptors, no rings, no memory controller in the PL. One
-TileLink slave per core (a twin of [RfLinkBridge](RfLinkBridge.md)), a clock-crossing FIFO, an N:1
+TileLink slave per core (a twin of [PutBridge](PutBridge.md)), a clock-crossing FIFO, an N:1
 arbiter, one 40-bit adder and a single-beat AXI4 write master.
 
 ## Role in the system
@@ -23,7 +23,7 @@ arbiter, one 40-bit adder and a single-beat AXI4 write master.
  ┌────────────────────────────────┐            ┌──────────────────────────────────────┐
  │ LSU ─ PostedStoreShim ─ dBus   │            │                                      │
  │  dMemPortDec ─┬─ 0x0000_0000 ctrl           │  StreamFifoCC ─┐                     │
- │               ├─ 0x0001_0000 RF window      │  (per core)    ├─ N:1 round robin ─  │
+ │               ├─ 0x0001_0000 put window     │  (per core)    ├─ N:1 round robin ─  │
  │               ├─ 0x4000_0000 HOST WINDOW ──▶│ HostWindowBridge ─┘   HostWindowFunnel│──▶ S_AXI_HP0_FPD ──▶ DDR4
  │               └─ 0x8000_0000 I+D RAM        │                  base + (core<<24) + offset
  └────────────────────────────────┘            └──────────────────────────────────────┘
@@ -43,13 +43,13 @@ transfer whatever the store size was.
 ## `HostWindowBridge` — the core side
 
 A write-only TileLink slave mapped over `SizeMapping(0x4000_0000, 1 << 24)` of the core's data-bus decode
-(`RiscvSoc.dMemPortDec`). It is [RfLinkBridge](RfLinkBridge.md) with three changes, all forced by the far
+(`RiscvSoc.dMemPortDec`). It is [PutBridge](PutBridge.md) with three changes, all forced by the far
 side being real memory rather than a converter-edge register file:
 
 - **`Stream`, not `Flow`.** DDR refresh, Linux traffic on the HP port and the `enable` gate can all stall
   the far side, so the AccessAck is issued *only when the command is accepted*: `bus.a.ready := cmd.ready
   && rsp.ready`, with each of the two forks gating the other's valid. A full FIFO therefore withholds the
-  ack and the CPU stalls on that store — **nothing is ever dropped**. (`RfLinkBridge` can ack
+  ack and the CPU stalls on that store — **nothing is ever dropped**. (`PutBridge` can ack
   unconditionally because its down path is a never-back-pressured `Flow`.)
 - **the byte mask travels**, so `sb`/`sh` work.
 - **`Get` is refused** — only `PutFull`/`PutPartial` size 4 are advertised and `s2m.none()`, so the fabric

@@ -208,7 +208,7 @@ object SocSpec {
  * is diffed against the python `riscq.map.SocMap` per config (`tests/test_spec_scala.py`).
  */
 object SocSpecMap {
-  val rfWindow = 0x10000        // RfLinkBridge base in the core's address space
+  val putWindow = 0x10000       // PutBridge base in the core's address space
   val rfChStride = 0x10000      // one sub-window per channel
   /** The put window (specs/cross-core/02 §3.2, D1): a posted write's address is `node · 2^16 + offset`.
    *  Nodes `0 until localNodes` are the core's OWN channels (node k = channel k, so the local channel
@@ -228,8 +228,8 @@ object SocSpecMap {
   def inboxUnit(core: Int): Int = localNodes + groupNodes + barrierIds + core
   def inboxNode(board: Int, core: Int): Int = (board << 8) | inboxUnit(core)
   def inboxNode(core: Int): Int = inboxNode(0, core)
-  /** The core's RF window width (the RfLinkBridge's rfAddrWidth) — the whole put window. */
-  def rfAddrWidth(core: CoreSpec): Int = {
+  /** The core's put-window width (the PutBridge's putAddrWidth), checked against its channel count. */
+  def putAddrWidth(core: CoreSpec): Int = {
     require(core.channels.length <= localNodes, s"core '${core.name}': more than $localNodes channels")
     putAddrWidth
   }
@@ -237,7 +237,7 @@ object SocSpecMap {
 
 case class SocSpecMap(spec: SocSpec) {
   private def pow2ceil(x: Int): Int = 1 << log2Up(x)
-  val rfWindow = SocSpecMap.rfWindow
+  val putWindow = SocSpecMap.putWindow
   val rfChStride = SocSpecMap.rfChStride
   val robWidth = SocSpec.adcBatch * 32
   val robBytes = robWidth * spec.robDepth / 8
@@ -258,8 +258,8 @@ case class SocSpecMap(spec: SocSpec) {
     require(j < spec.cores(core).channels.length, s"core $core has no channel $j")
     slotBases(j) + core * slotStrides(j)
   }
-  def channelBase(j: Int): Int = rfWindow + j * rfChStride
-  def rfAddrWidth(core: Int): Int = SocSpecMap.rfAddrWidth(spec.cores(core))
+  def channelBase(j: Int): Int = putWindow + j * rfChStride
+  def putAddrWidth(core: Int): Int = SocSpecMap.putAddrWidth(spec.cores(core))
   /** `PulseTableSoc.dacAlignStages + 2` — the python `dac_pipe` (uniform across driven DACs). */
   def dacPipe: Int = {
     def combineLatency(n: Int) = if (n <= 1) 0 else log2Up(n) + 1
@@ -299,7 +299,7 @@ object PrintSocMap extends App {
       ujson.Obj("index" -> j, "name" -> ch.name, "kind" -> ch.kind, "base" -> m.channelBase(j),
         "slots" -> ch.slots, "samples_per_line" -> ch.samplesPerLine, "line_bytes" -> ch.lineBytes,
         "dac" -> optNum(ch.dac), "adc" -> optNum(ch.adc)) }: _*) }: _*),
-    "rf_addr_width" -> ujson.Arr(spec.cores.indices.map(i => ujson.Num(m.rfAddrWidth(i))): _*),
+    "put_addr_width" -> ujson.Arr(spec.cores.indices.map(i => ujson.Num(m.putAddrWidth(i))): _*),
     "dac_pipe" -> m.dacPipe)
   println(ujson.write(out))
 }

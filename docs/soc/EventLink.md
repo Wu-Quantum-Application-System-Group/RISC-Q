@@ -4,10 +4,10 @@
 **Type:** descriptors (`EventSource`, `SinkSpec`, `EventPlan`) + helpers (`object EventLink`:
 `resultSource`, `serialize`, `merge`) + the core-side sinks (`ReadoutResultSink`, `EventFifoSink`, `LatestSink`, `MailboxSink`, `Area`s)
 
-The link's **only** return path: one narrow posted `Flow(RfCmd)` per core carries **word writes into the
+The link's **only** return path: one narrow posted `Flow(Put)` per core carries **word writes into the
 core's inbox** — every reporting channel's report, serialised into puts at the offsets of its sink's
 register window, which the CPU then reads locally. It is the up-direction counterpart to the down-link
-([RfLinkBridge](RfLinkBridge.md) / [RfLink](RfLink.md)) and, since
+([PutBridge](PutBridge.md) / [PutLink](PutLink.md)) and, since
 [specs/cross-core/02](../../specs/cross-core/02-put-network.md) R1, carries the **same bundle** in both
 directions: nothing on the link is typed, and the same path carries the board hub's re-puts (group
 words, barrier releases, signals — [PutHub](PutHub.md)) since R2.
@@ -17,7 +17,7 @@ words, barrier releases, signals — [PutHub](PutHub.md)) since R2.
 ```
   reporting channel ──▶ EventSource ─▶ serialize ─┐                        ┌─▶ ReadoutResultSink ─▶ CPU
      (decoder res / DIO edges)                    ├─ merge ─ linkPipe ─▶ ───┤     (halting res read)
-  reporting channel ──▶ EventSource ─▶ serialize ─┘  Flow(RfCmd{offset, data}) └─▶ EventFifoSink ─────▶ CPU
+  reporting channel ──▶ EventSource ─▶ serialize ─┘  Flow(Put{offset, data}) └─▶ EventFifoSink ─────▶ CPU
          (DSP region)                                 posted, up, no ack         (halting pop_event)
                                                                                (core region, local halt)
 ```
@@ -48,7 +48,7 @@ rebuilt at the sink with the link's delay and no beat is ever missed.
 
 ### Serialisation (`EventLink.serialize`) — one report, several puts
 
-`serialize(source, sink, queueDepth = 4)` turns a reporter into an ordered `Stream(RfCmd)`: each event
+`serialize(source, sink, queueDepth = 4)` turns a reporter into an ordered `Stream(Put)`: each event
 is queued (`queueDepth`; a beat into a full queue is **dropped**, posted semantics, which the FIFO
 sinks' sequence numbers expose) and then walked word by word, one put per cycle. The word list is the
 only place a sink kind's put protocol is written:
@@ -61,7 +61,7 @@ only place a sink kind's put protocol is written:
 | `latest` | 1 per word | a plain word overwritten by the put to its offset (the [PutHub](PutHub.md)'s group board) |
 | `mailbox` | 1 | one word + a full flag: the put fills it, the halting read consumes it (the barrier release, the signal mailboxes) |
 
-`merge(sources, sinks)` joins the reporters' streams onto the one up-link `Flow(RfCmd)`: one reporter is
+`merge(sources, sinks)` joins the reporters' streams onto the one up-link `Flow(Put)`: one reporter is
 its serialiser alone (the qubit builds); several share a round-robin arbiter with no lock — a put is
 self-contained and every sink is written by exactly one reporter, so interleaving is harmless.
 
@@ -149,7 +149,7 @@ local single-cycle arcs. Pipe depth is a floorplan knob, never a timing-closure 
 ## Verification
 
 - `riscq.soc.sim.EventSinkSim` — the generic up-link: two reporters (a `result` source and a `fifo`
-  source with a cause time) are serialised into puts and share one `Flow(RfCmd)` through
+  source with a cause time) are serialised into puts and share one `Flow(Put)` through
   `EventLink.merge` and `linkPipe` stages into their two sinks at `0x4200`/`0x4220`. Asserts the FIFO
   sink's `pop` halts, returns the first data word and consumes it, with `time`/`seq` reading back
   exactly and `count` the occupancy; that a beat of each reporter landing on the **same cycle** reaches
@@ -178,7 +178,7 @@ mill runMain riscq.soc.sim.TimedDioSim
 
 - [ReadoutDecoder](../dsp/ReadoutDecoder.md) — produces `{res, real, imag}` and `res.valid`.
 - [TimedDio](TimedDio.md) — the `fifo`-kind reporter (input edges + cause time).
-- [RfLink](RfLink.md) / [RfLinkBridge](RfLinkBridge.md) — the matching down-link, the same `RfCmd`.
+- [PutLink](PutLink.md) / [PutBridge](PutBridge.md) — the matching down-link, the same `Put`.
 - [RiscvSoc](RiscvSoc.md) — instantiates the sinks from the plan's `SinkSpec`s.
 - [SocSpec](SocSpec.md) — the channel list `EventPlan` reads.
 - [ControlMemMaps](ControlMemMaps.md) — the other (core-local) RF reads.

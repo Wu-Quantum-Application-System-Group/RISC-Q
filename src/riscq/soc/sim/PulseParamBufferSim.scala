@@ -5,18 +5,18 @@ import spinal.core.sim._
 import spinal.lib._
 import riscq.dsp._
 import riscq.dsp.pulse._
-import riscq.soc.link.RfCmd
+import riscq.soc.link.Put
 import riscq.soc.rf.{PulseParamBuffer, PulseParamBufferParams}
 
 /**
- * Sign-off for [[PulseParamBuffer]]: drive the buffer's **posted** `Flow(RfCmd)` directly — write a
+ * Sign-off for [[PulseParamBuffer]]: drive the buffer's **posted** `Flow(Put)` directly — write a
  * pulse table entry + the shared `freq` + the per-buffer `startTime`, then "fire" it by writing
  * `outId` — feed its output `Flow`s into a real [[PulseGenerator]], and check the generated pulse
  * bit-exact vs the **existing [[PulseGenerator]] golden** (the composed per-block model, reused from
  * `PulseGeneratorSim`).
  *
  * This proves the posted-link register file is value-preserving: the RF register map (offsets /
- * `bitOffset=16` field packing / fire semantics) decoded off a one-way `RfCmd` stream, with
+ * `bitOffset=16` field packing / fire semantics) decoded off a one-way `Put` stream, with
  * `startTime` folded into the buffer (per-buffer register).
  *
  * Run with `./.metals/mill runMain riscq.soc.sim.PulseParamBufferSim`.
@@ -86,10 +86,10 @@ object PulseParamBufferSim extends App {
   val pB = Pulse(1, startTime = 450, amp = 7000,  freq = -1500, phase = 1000, base = 20, dur = 5)
   val totalCycles = 560
 
-  /** Test top: a [[PulseParamBuffer]] driven by a poke-able `RfCmd` Flow, its output Flows feeding a
+  /** Test top: a [[PulseParamBuffer]] driven by a poke-able `Put` Flow, its output Flows feeding a
    *  real [[PulseGenerator]]; poke-able `timeBcast`; the complex envelope Mem; the pulse re-exported. */
   case class Dut() extends Component {
-    val cmd       = slave port Flow(RfCmd(addrWidth))
+    val cmd       = slave port Flow(Put(addrWidth))
     val timeBcast = in port UInt(timeWidth bits)
 
     val buf = PulseParamBuffer(PulseParamBufferParams(
@@ -137,7 +137,7 @@ object PulseParamBufferSim extends App {
     cd.forkStimulus(10)
     cd.waitSampling(20)
 
-    // ── posted-write helpers: pulse one RfCmd beat ──
+    // ── posted-write helpers: pulse one Put beat ──
     def post(addr: Int, data: Int): Unit = {
       dut.cmd.valid #= true
       dut.cmd.payload.address #= addr
@@ -248,7 +248,7 @@ object PulseParamBufferSim extends App {
     postTight(Seq((0x0, pA.idx), (startTimeAddr, t3b)))
     assert(readStart() == t3b, s"[B0 priority] startTime ${readStart()} != $t3b (explicit write must win)")
 
-    println(s"[PulseParamBufferSim] PASS  pulseNum=$pulseNum N=$N w=$w useMem=$useMem: 2 posted-RfCmd-driven pulses bit-exact " +
+    println(s"[PulseParamBufferSim] PASS  pulseNum=$pulseNum N=$N w=$w useMem=$useMem: 2 posted-Put-driven pulses bit-exact " +
       s"vs the PulseGenerator golden; valid window exactly [startTime+$offA, +dur); uniform bulk latency $offA.")
     simSuccess()
   }
@@ -256,7 +256,7 @@ object PulseParamBufferSim extends App {
   // ── spec 09 B0: pulseNum = 1 (depth-1 table ⇒ FF register file, no addressable index) advances
   //    startTime identically. Buffer-only DUT — the register semantics don't need a PulseGenerator. ──
   case class Dut1() extends Component {
-    val cmd       = slave port Flow(RfCmd(addrWidth))
+    val cmd       = slave port Flow(Put(addrWidth))
     val timeBcast = in    port UInt(timeWidth bits)
     val buf = PulseParamBuffer(PulseParamBufferParams(
       pulseNum = 1, dataWidth = w, envAddrWidth = envAddrW, durWidth = durWidth,

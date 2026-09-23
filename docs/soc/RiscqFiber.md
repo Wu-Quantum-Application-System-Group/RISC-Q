@@ -7,7 +7,7 @@
 The thin shim that plugs one RISC-V [`Riscq`](../riscv/RISCV.md) core into the SoC's `tilelink.fabric`
 interconnect. It instantiates the core and re-exposes its two memory masters — instruction fetch and
 data — as `tilelink.fabric.Node.down()` master nodes the rest of the SoC can decode to slaves
-(RAMs, the control block, the RF link).
+(RAMs, the control block, the put link).
 
 ## Role in the system
 
@@ -17,7 +17,7 @@ LsuPlugin.dBus (simplified DataMemBus) ─► PostedStoreShim ─► DataMemBusT
 ```
 
 `RiscqFiber` is the bottom of the per-core stack: [`RiscvSoc`](RiscvSoc.md) decodes `iBus`/`dBus` to
-the core's I/D RAM, the control block and the [`RfLinkBridge`](RfLinkBridge.md); everything above is
+the core's I/D RAM, the control block and the [`PutBridge`](PutBridge.md); everything above is
 ordinary fabric wiring.
 
 ## Design rationale

@@ -3,7 +3,7 @@ package riscq.soc.rf
 import spinal.core._
 import spinal.lib._
 import riscq.dsp.Complex
-import riscq.soc.link.{EventSource, RfCmd}
+import riscq.soc.link.{EventSource, Put}
 
 /**
  * The contract every converter-edge channel kind implements (specs/universal-control/01 §2.3): one
@@ -14,7 +14,7 @@ import riscq.soc.link.{EventSource, RfCmd}
  * expands to (the DAC batch for drives, the ADC batch for the demod).
  */
 trait Channel extends Component {
-  def cmd: Flow[RfCmd]
+  def cmd: Flow[Put]
   def timeBcast: UInt
   def memPort: Option[MemReadPort[Bits]]   // the envelope-RAM read port, for kinds with a bank
   def envLanes: Int                        // lanes a stored line expands to (0 = no bank)

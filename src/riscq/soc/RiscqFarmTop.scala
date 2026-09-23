@@ -4,7 +4,7 @@ import spinal.core._
 import spinal.core.fiber.Fiber
 import spinal.lib._
 import riscq.riscv.RiscqParam
-import riscq.soc.link.{EventLink, RfCmd}
+import riscq.soc.link.{EventLink, Put}
 
 import scala.collection.mutable.ArrayBuffer
 
@@ -80,7 +80,7 @@ case class RiscqFarmTop(
       when(cmdDn.valid)(acc := acc ^ cmdDn.payload.data ^ cmdDn.payload.address.asBits.resize(32))
 
       // drive the up-link result from the accumulator (exercises the full resultIn boundary width).
-      val res = Flow(RfCmd(EventLink.inboxAddrWidth))   // the up-link: puts into the inbox
+      val res = Flow(Put(EventLink.inboxAddrWidth))   // the up-link: puts into the inbox
       res.valid        := cmdDn.valid && (cmdDn.payload.address === 0x30000)
       res.payload.address := acc(0, EventLink.inboxAddrWidth bits).asUInt
       res.payload.data    := acc

@@ -26,7 +26,7 @@
 #                                                                 (riscv-fmax §2 C3)
 #   core.other             everything else inside the CPU (riscqFiber_riscq)
 #   rvsoc-boundary         RiscvSoc outside the CPU: posted-store shim, dBus/iBus pipes,
-#                          iLoad arbiter, control block, RfLinkBridge, result sink
+#                          iLoad arbiter, control block, PutBridge, result sink
 #   rf-link                posted-link pipes at the top (cmd down / upSrc result up)
 #   rf-buf                 PulseParamBuffer register files (the cmd demux targets)
 #   rf-channel             converter-edge channel glue (envReader, output stages, carrier

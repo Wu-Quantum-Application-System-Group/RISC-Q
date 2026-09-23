@@ -71,7 +71,7 @@ def test_heterogeneous_host_map_uses_the_same_algebra():
     with pytest.raises(ValueError, match="unknown channel index"):
         m.env_base(1, 1)                              # the loader has one channel
     assert [c.base for c in m.channels(0)] == [0x10000 + k * 0x10000 for k in range(5)]
-    assert m.rf_addr_width(0) == 28 and m.rf_addr_width(1) == 28   # the put window, fixed
+    assert m.put_addr_width(0) == 28 and m.put_addr_width(1) == 28   # the put window, fixed
     assert m.dac_of(0, 1) == 1 and m.adc_of(0) == 12
     kinds = [e.kind for e in m.entries()]
     assert kinds.count("env_f0g1") == 1 and kinds.count("env_aom") == 1

@@ -4,20 +4,20 @@
 
 The converter-edge register file for a single [PulseGenerator](../dsp/PulseGenerator.md): it holds that
 generator's pulse table, `freq`, `startTime` and a local `time` copy, all driven by the demuxed **posted**
-`Flow(RfCmd)` (no TileLink, no D channel), and emits the parameter `Flow`s plus `time`/`startTime` to the
+`Flow(Put)` (no TileLink, no D channel), and emits the parameter `Flow`s plus `time`/`startTime` to the
 generator. It is the *only* part of the per-generator control state that must sit at the converter edge
 with the generator — its sole CPU-facing input is a narrow `Flow`.
 
 ## Role in the system
 
 ```
-  RfLink demux ── Flow(RfCmd) ──▶ PulseParamBuffer ──▶ PulseGenerator ──▶ DAC
+  PutLink demux ── Flow(Put) ──▶ PulseParamBuffer ──▶ PulseGenerator ──▶ DAC
   time broadcast ───────────────▶  (table / freq /        (lead-time
                                     startTime / time)       TimedQueues)
 ```
 
 It replaces the old per-peripheral TileLink `SlaveFactory` with a register file decoded directly off the
-one-way `RfCmd` stream. Packaged with its generator into a [PulseDriveChannel](RfChannels.md) — the box the
+one-way `Put` stream. Packaged with its generator into a [PulseDriveChannel](RfChannels.md) — the box the
 floorplan pins.
 
 ## What the posted stream writes
@@ -42,14 +42,14 @@ The decode is **parallel per target**, not one address switch: the target window
 scalar register (`fire`/`freq`/`startTime`/`dcOffset`/`phaseOffset`) costs one exact-match compare, and the
 table write is split by address — slot index `address >> 4` (one range compare over `1..pulseNum`; entry `i`
 lives in slot `i+1`) plus field select `address[3:2]` — instead of `4·pulseNum` full-address comparators.
-Upstream traffic is word-aligned 4-byte Puts ([RfLinkBridge](RfLinkBridge.md)), so `address[1:0]` is always 0.
+Upstream traffic is word-aligned 4-byte Puts ([PutBridge](PutBridge.md)), so `address[1:0]` is always 0.
 Each beat still writes exactly one field of one entry. Reset/init is all zero, so an un-programmed or
 spurious-reset fire reads a benign `dur = 0`.
 
 ## Design rationale & contracts
 
 - **Per-buffer `startTime`, written on the same posted path as the fire.** `startTime` is *not* broadcast;
-  it is a buffer-local register written by this buffer's own `RfCmd` stream. Because `startTime` and the
+  it is a buffer-local register written by this buffer's own `Put` stream. Because `startTime` and the
   `outId` fire share one **ordered** posted path, the fire always enqueues *exactly* the value just
   written — no cross-path race between a separately-broadcast `startTime` and a separately-posted fire
   ([ARCH](ARCH.md) §5.3).
@@ -84,7 +84,7 @@ spurious-reset fire reads a benign `dur = 0`.
   the posted write *arrives before* `time` reaches it. The constant link delay `D` makes the core's `time`
   copy read `dspTime − D`, so a CPU `startTime = localTime + lead` fires at `dspTime + (lead − D)` — a
   constant, predictable effective lead. The requirement is `lead − D > down-link latency`. This is the
-  invariant the whole posted-link architecture rests on — see [RfLinkBridge](RfLinkBridge.md),
+  invariant the whole posted-link architecture rests on — see [PutBridge](PutBridge.md),
   [ARCH](ARCH.md) §2, and the `TimedQueue` lead-time pop in [PulseGenerator](../dsp/PulseGenerator.md) /
   [TimedQueue](../dsp/TimedQueue.md).
 - **Bit-exactness.** The fire path is a `Reg(Flow)` timed by one shared post-fire register (`fired`, which
@@ -110,7 +110,7 @@ ports — see the source for the full list.
 
 ## Verification
 
-`riscq.soc.sim.PulseParamBufferSim` drives the buffer's posted `Flow(RfCmd)` directly (write `startTime`,
+`riscq.soc.sim.PulseParamBufferSim` drives the buffer's posted `Flow(Put)` directly (write `startTime`,
 `freq`, a table entry, then fire by writing `outId`), feeds its output `Flow`s into a real
 [PulseGenerator](../dsp/PulseGenerator.md), and checks the pulse **bit-exact vs the existing PulseGenerator
 golden** — proving the posted-link register file is value-preserving (offsets, `bitOffset=16` field
@@ -126,5 +126,5 @@ mill runMain riscq.soc.sim.PulseParamBufferSim
 
 - [RfChannels](RfChannels.md) — `PulseDriveChannel` packages this buffer with its generator.
 - [PulseGenerator](../dsp/PulseGenerator.md) / [TimedQueue](../dsp/TimedQueue.md) — the consumer and the lead-time pop.
-- [RfLink](RfLink.md) / [RfLinkBridge](RfLinkBridge.md) — the posted stream feeding it.
+- [PutLink](PutLink.md) / [PutBridge](PutBridge.md) — the posted stream feeding it.
 - [ARCH](ARCH.md) §5.2–5.3 — per-buffer `startTime` and the same-cycle-rise contract.

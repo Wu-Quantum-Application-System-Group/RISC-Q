@@ -3,7 +3,7 @@ package riscq.soc.sim
 import spinal.core._
 import spinal.core.sim._
 import spinal.lib._
-import riscq.soc.link.{EventLink, PutHub, RfCmd}
+import riscq.soc.link.{EventLink, PutHub, Put}
 import riscq.soc.spec.SocSpecMap
 
 import scala.collection.mutable.ArrayBuffer
@@ -31,7 +31,7 @@ object PutHubSim extends App {
 
   case class Dut() extends Component {
     val hub  = PutHub(cores = cores)
-    val puts = Vec(slave port Flow(RfCmd(SocSpecMap.putAddrWidth)), cores)
+    val puts = Vec(slave port Flow(Put(SocSpecMap.putAddrWidth)), cores)
     val time = in port UInt(32 bits)
     val bcast = master port cloneOf(hub.out)
     for (i <- 0 until cores) hub.in(i) << puts(i)

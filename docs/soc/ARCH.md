@@ -50,20 +50,20 @@ Three pipelined, unidirectional, timing-insensitive `Flow`s cross between a core
 | Bundle | Dir | Contents | Pipelinable because |
 |---|---|---|---|
 | **time** | down | the 32-bit batch-time counter, broadcast to all buffers with equal delay | continuous; lead-time absorbs constant delay |
-| **`RfCmd`** | down | `{address, data}` — one posted RF register write (table / `freq` / `startTime` / fire) | posted, no ack, single ordered path |
-| **put** (`RfCmd`) | up | `{offset, data}` — one word written into the core's inbox: a channel's report serialised (the readout result, a DIO edge, …) or the board hub's re-puts (group words, barrier releases, signals — [PutHub](PutHub.md)) | posted, polled locally; no round-trip |
+| **put** (`Put`) | down | `{address, data}` — one posted register write into a channel (table / `freq` / `startTime` / fire) | posted, no ack, single ordered path |
+| **put** (`Put`) | up | `{offset, data}` — one word written into the core's inbox: a channel's report serialised (the readout result, a DIO edge, …) or the board hub's re-puts (group words, barrier releases, signals — [PutHub](PutHub.md)) | posted, polled locally; no round-trip |
 
 This is roughly half the wires of a TileLink a+d, one-way, and it sheds the fabric decode/arbiter logic
 at the converter edge entirely. The building blocks:
 
-- [`RfLinkBridge`](RfLinkBridge.md) sits next to the core: a tiny write-only TileLink slave over the RF
+- [`PutBridge`](PutBridge.md) sits next to the core: a tiny write-only TileLink slave over the put
   window that **acks every CPU store locally in one cycle** (so the core's bus arc stays short and in the
-  core region) and emits one ordered `Flow(RfCmd)` downstream.
-- [`RfLink`](RfLink.md) `pipe`s the stream (`linkPipe` `RegNext` stages) and `demux`es it to one
+  core region) and emits one ordered `Flow(Put)` downstream.
+- [`PutLink`](PutLink.md) `pipe`s the stream (`linkPipe` `RegNext` stages) and `demux`es it to one
   `0x10000` sub-window per entry of the core's `spec.channels` (pure combinational routing — a `Flow` has
   no back-pressure, so no arbiter).
 - [`PulseParamBuffer`](PulseParamBuffer.md) is the DSP-side register file for one channel, driven by
-  the demuxed `RfCmd` instead of a `SlaveFactory`. It is the only thing that must sit at the converter
+  the demuxed `Put` instead of a `SlaveFactory`. It is the only thing that must sit at the converter
   edge with the datapath block. A **channel kind** packages the two behind one
   [`Channel`](RfChannels.md) interface the shell instantiates through:
   [`PulseDriveChannel`](RfChannels.md) (`pulse`, DAC-bound), [`DemodChannel`](RfChannels.md) (`demod`,
@@ -77,10 +77,10 @@ at the converter edge entirely. The building blocks:
 ## The `startTime` software contract
 
 `time` is broadcast down the link, but **`startTime` is per-buffer** — written by that buffer's own
-`RfCmd` stream (`startTime` folded into the RF address map), not broadcast. This is deliberate: it puts
+`Put` stream (`startTime` folded into the RF address map), not broadcast. This is deliberate: it puts
 `startTime` and the `outId` fire on the **same ordered posted path**, so the fire always enqueues exactly
 the `startTime` just written — no cross-path race between a separately-broadcast `startTime` and a
-separately-posted fire. Within one generator, `RfCmd`s are an ordered stream (single posted path), so
+separately-posted fire. Within one generator, `Put`s are an ordered stream (single posted path), so
 table writes precede their fire as the program intends. Cross-generator order is not guaranteed, but the
 pop is by `startTime` *value*, not arrival, so it doesn't matter for the rise cycle.
 
@@ -170,7 +170,7 @@ is baked by the per-flow `pblocks-*.tcl` in the Vivado flows — see [`Zcu216Top
 - [`RiscqRfWithPulseTableFiber`](RiscqRfWithPulseTableFiber.md) — one qubit (core + datapath over the link).
 - [`RiscvSoc`](RiscvSoc.md) — the hard, registered-boundary core unit (the floorplan target).
 - [`SocSpec`](SocSpec.md) — the build description (cores → channel lists) and the derived host map.
-- Posted link: [`RfLinkBridge`](RfLinkBridge.md) · [`RfLink`](RfLink.md) ·
+- Posted link: [`PutBridge`](PutBridge.md) · [`PutLink`](PutLink.md) ·
   [`EventLink`](EventLink.md) · [`PostedStoreShim`](PostedStoreShim.md).
 - RF datapath: [`RfChannels`](RfChannels.md) · [`TimedDio`](TimedDio.md) ·
   [`PulseParamBuffer`](PulseParamBuffer.md) · [`ControlMemMaps`](ControlMemMaps.md).

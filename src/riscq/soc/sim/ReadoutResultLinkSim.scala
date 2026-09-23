@@ -11,7 +11,7 @@ import spinal.lib.bus.misc.SizeMapping
 import riscq.dsp._
 import riscq.dsp.pulse._
 import riscq.soc.fabric.MemMapFiber
-import riscq.soc.link.{EventLink, ReadoutResultSink, RfLink, SinkSpec}
+import riscq.soc.link.{EventLink, ReadoutResultSink, PutLink, SinkSpec}
 
 import scala.math.{cos, sin}
 
@@ -79,7 +79,7 @@ object ReadoutResultLinkSim extends App {
     val spec  = SinkSpec("res", EventLink.resultKind, 0, EventLink.sinkBase, EventLink.resultDataWidth(accWidth))
     val upSrc = EventLink.merge(Seq(EventLink.resultSource(rd.io.res.valid, rd.io.res.payload, rd.io.real, rd.io.imag, accWidth)), Seq(spec))
     val sink  = ReadoutResultSink(accWidth, base = spec.base)
-    sink.resultIn << RfLink.pipe(upSrc, linkPipe)
+    sink.resultIn << PutLink.pipe(upSrc, linkPipe)
     sink.valid.simPublic()
 
     // ── core-side local read map for res/real/imag ──

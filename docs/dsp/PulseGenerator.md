@@ -28,7 +28,7 @@ an exact phase wrap).
 ```
 
 In the SoC the parameter Flows are driven by [PulseParamBuffer](../soc/PulseParamBuffer.md) over the
-posted RF link, `io.time` is the shared SoC batch clock, the envelope RAM is host-written, and
+posted link, `io.time` is the shared SoC batch clock, the envelope RAM is host-written, and
 `io.pulse` feeds the converter-edge drive channel. See [PulseTableSoc](../soc/PulseTableSoc.md) and
 [ARCH.md](../soc/ARCH.md). This component is a plain leaf `Component` (FiberPlugin/Tilelink
 integration is the SoC's job); standalone it talks to an external `MemReadPort`.

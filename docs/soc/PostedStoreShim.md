@@ -20,8 +20,8 @@ LsuPlugin.dBus ──► PostedStoreShim ──► DataMemBusToTilelink ──�
                    (read : forward, real rsp)
 ```
 
-It is the **local-store** half of the SoC's posting strategy; the [`RfLinkBridge`](RfLinkBridge.md)
-is the same idea applied to RF writes over the long posted link (see [ARCH](ARCH.md) §5.1). Both exist
+It is the **local-store** half of the SoC's posting strategy; the [`PutBridge`](PutBridge.md)
+is the same idea applied to channel writes over the long posted link (see [ARCH](ARCH.md) §5.1). Both exist
 because the LSU waits for a d-channel ack — posting the ack near the core keeps that arc short and
 fast.
 
@@ -87,5 +87,5 @@ mill runMain riscq.soc.sim.PostedStoreShimSim
 
 ## Related
 
-[RiscqFiber](RiscqFiber.md) · [LsuPlugin](../riscv/LsuPlugin.md) · [RfLinkBridge](RfLinkBridge.md) ·
+[RiscqFiber](RiscqFiber.md) · [LsuPlugin](../riscv/LsuPlugin.md) · [PutBridge](PutBridge.md) ·
 [ARCH](ARCH.md)
