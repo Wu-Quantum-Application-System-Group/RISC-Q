@@ -1,0 +1,19 @@
+{
+    "name": "x6y3",
+    "qubit_num": 8,
+    "dac_num": 16,
+    "adc_num": 16,
+    "dac_map": [[0, 8], [1, 8], [2, 8], [3, 8], [4, 8], [5, 8], [6, 8], [7, 8]],
+    "adc_map": [12, 12, 12, 12, 12, 12, 12, 12],
+    "mem_depth": 8192,
+    "env_depth": 4096,
+    "gate_pulse_num": 32,
+    "gate_interp": 4,
+    "readout_interp": 16,
+    "demod_interp": 4,
+    "link_pipe": 2,
+    "hostwin_bits": 23,
+    "queue_depth": 32,
+    "with_mul": true,
+    "dsp_freq_hz": 500000000.0
+}

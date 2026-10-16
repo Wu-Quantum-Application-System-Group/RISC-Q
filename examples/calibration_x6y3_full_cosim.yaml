@@ -1,0 +1,250 @@
+# The FULL-FLOW co-sim qcal config for examples/calibration_x6y3_full_cosim.ipynb — the same tree
+# shape as the X6Y3 config of record (examples/cal-config-x6y3.yaml), scaled to the sim-2q1c
+# build (dsp 100 MHz, batch 10 ns) like calibration_x6y3_cosim.yaml, and EXTENDED with everything
+# the full calibration chain touches: an EF subspace per qubit (freq + X90 with its virtual-Z pair
+# + X), a third qubit (core 2 — the SpectatorPhase bystander), and a `two_qubit`
+# drive-form CZ entry for the ring pair (0, 1) — two drive lines on the pair's own gate channels
+# plus channel-matched virtual-Z entries for Q0/Q1 (LocalPhases) and Q2 (SpectatorPhase), exactly
+# the X6Y3 layout.
+#
+# Carrier codes are chosen so every per-line demod reference set {f_GE, f_EF, f_CZ} is separated by
+# a MULTIPLE OF 4096 codes — the exact 16-sample demod null (the test_models/test_twoqubit_cosim
+# convention) — so the models' 3-way GE/EF/CZ argmax is unambiguous:
+#   q0: GE 2048 (50 MHz),  EF 18432 (450 MHz)   |  q1: GE 6144 (150 MHz), EF 26624 (650 MHz)
+#   q2: GE 4096 (100 MHz), EF 20480 (500 MHz)   |  CZ (f_11 + f_02)/4 = 10240 (250 MHz)
+# The tree's CZ freq (242 MHz) and target-line phase (2.0 rad) are deliberately UNCALIBRATED — the
+# seed + CZ chain pull them to the planted truth (250 MHz, 0 rad). `herald: true` mirrors the
+# X6Y3 device config for every counts-mode 1Q step.
+
+single_qubit:
+  0:
+    GE:
+      freq: 50000000.0        # DAC freq code 2048
+      T1: 6.0e-06             # 600 batches (matches the planted model's readout budget)
+      T2*: 3.0e-05            # 3000 batches
+      X90:
+        pulse:
+        - channel: Q0.qdrv
+          env: virtualz
+          time: 0.0
+          kwargs: {phase: 0.0}
+        - channel: Q0.qdrv
+          env: square         # 4 batches on the gate channel == the 16-sample GATE_ENV
+          time: 4.0e-08
+          kwargs: {amp: 0.5, phase: 0.0}
+        - channel: Q0.qdrv
+          env: virtualz
+          time: 0.0
+          kwargs: {phase: 0.0}
+      X:
+        pulse:                # double-length square (the chain preps X90·X90; from_qcal needs it)
+        - channel: Q0.qdrv
+          env: square
+          time: 8.0e-08
+          kwargs: {amp: 0.495, phase: 0.0}
+    EF:
+      freq: 450000000.0       # code 18432 — a 16384-code (4×4096) null from the GE line
+      T1: 6.0e-06
+      T2*: 3.0e-05
+      X90:
+        pulse:
+        - channel: Q0.qdrv
+          env: virtualz
+          time: 0.0
+          kwargs: {phase: 0.0}
+        - channel: Q0.qdrv
+          env: square
+          time: 4.0e-08
+          kwargs: {amp: 0.4, phase: 0.0}
+        - channel: Q0.qdrv
+          env: virtualz
+          time: 0.0
+          kwargs: {phase: 0.0}
+      X:
+        pulse:
+        - channel: Q0.qdrv
+          env: square
+          time: 8.0e-08
+          kwargs: {amp: 0.4, phase: 0.0}
+  1:
+    GE:
+      freq: 150000000.0       # code 6144
+      T1: 6.0e-06
+      T2*: 3.0e-05
+      X90:
+        pulse:
+        - channel: Q1.qdrv
+          env: virtualz
+          time: 0.0
+          kwargs: {phase: 0.0}
+        - channel: Q1.qdrv
+          env: square
+          time: 4.0e-08
+          kwargs: {amp: 0.5, phase: 0.0}
+        - channel: Q1.qdrv
+          env: virtualz
+          time: 0.0
+          kwargs: {phase: 0.0}
+      X:
+        pulse:
+        - channel: Q1.qdrv
+          env: square
+          time: 8.0e-08
+          kwargs: {amp: 0.495, phase: 0.0}
+    EF:
+      freq: 650000000.0       # code 26624 — 20480 (5×4096) from GE, 16384 from the CZ tone
+      T1: 6.0e-06
+      T2*: 3.0e-05
+      X90:
+        pulse:
+        - channel: Q1.qdrv
+          env: virtualz
+          time: 0.0
+          kwargs: {phase: 0.0}
+        - channel: Q1.qdrv
+          env: square
+          time: 4.0e-08
+          kwargs: {amp: 0.4, phase: 0.0}
+        - channel: Q1.qdrv
+          env: virtualz
+          time: 0.0
+          kwargs: {phase: 0.0}
+      X:
+        pulse:
+        - channel: Q1.qdrv
+          env: square
+          time: 8.0e-08
+          kwargs: {amp: 0.4, phase: 0.0}
+  2:
+    GE:
+      freq: 100000000.0       # code 4096 — the spectator's own carrier
+      T1: 6.0e-06
+      T2*: 3.0e-05
+      X90:
+        pulse:
+        - channel: Q2.qdrv
+          env: virtualz
+          time: 0.0
+          kwargs: {phase: 0.0}
+        - channel: Q2.qdrv
+          env: square
+          time: 4.0e-08
+          kwargs: {amp: 0.5, phase: 0.0}
+        - channel: Q2.qdrv
+          env: virtualz
+          time: 0.0
+          kwargs: {phase: 0.0}
+      X:
+        pulse:
+        - channel: Q2.qdrv
+          env: square
+          time: 8.0e-08
+          kwargs: {amp: 0.495, phase: 0.0}
+    EF:
+      freq: 500000000.0       # code 20480 (structural — the spectator plays no EF pulse)
+      T1: 6.0e-06
+      T2*: 3.0e-05
+      X90:
+        pulse:
+        - channel: Q2.qdrv
+          env: virtualz
+          time: 0.0
+          kwargs: {phase: 0.0}
+        - channel: Q2.qdrv
+          env: square
+          time: 4.0e-08
+          kwargs: {amp: 0.4, phase: 0.0}
+        - channel: Q2.qdrv
+          env: virtualz
+          time: 0.0
+          kwargs: {phase: 0.0}
+      X:
+        pulse:
+        - channel: Q2.qdrv
+          env: square
+          time: 8.0e-08
+          kwargs: {amp: 0.4, phase: 0.0}
+
+readout:
+  0:
+    channel: 0
+    freq: 12500000.0          # demod_code_to_freq(2048) — core 0's multiplex slot
+    amp: 0.5
+    time: 5.6e-07             # 56-batch drive (covers the 40-batch window + SEP)
+    env: square
+    kwargs: {}
+    demod:
+      delay: 0.0              # the ADC round trip is 0 in co-sim
+      phase: 0.0              # degrees; ReadoutCalibration measures and overwrites this
+      time: 4.0e-07           # 40-batch integration window
+      env: square
+      kwargs: {amp: 1.0}
+  1:
+    channel: 1
+    freq: 6250000.0           # demod_code_to_freq(1024) — core 1's multiplex slot
+    amp: 0.5
+    time: 5.6e-07
+    env: square
+    kwargs: {}
+    demod:
+      delay: 0.0
+      phase: 0.0
+      time: 4.0e-07
+      env: square
+      kwargs: {amp: 1.0}
+  2:
+    channel: 2
+    freq: 18750000.0          # demod_code_to_freq(3072) — the spectator's multiplex slot
+    amp: 0.5
+    time: 5.6e-07
+    env: square
+    kwargs: {}
+    demod:
+      delay: 0.0
+      phase: 0.0
+      time: 4.0e-07
+      env: square
+      kwargs: {amp: 1.0}
+  herald: true                # the X6Y3 device runs heralded readout — so does this chain
+
+two_qubit:
+  (0, 1):
+    CZ:
+      freq: 242000000.0       # UNCALIBRATED start — the drive-form truth is 250 MHz (code 10240)
+      pulse:
+      - channel: Q0.qdrv      # the CONTROL line: the pair's own gate channel, phase 0
+        env: square
+        time: 3.0e-07         # 30 batches
+        kwargs: {amp: 0.35, phase: 0.0}
+      - channel: Q1.qdrv      # the TARGET line: same amp, the RELATIVE phase — mis-set (truth 0.0)
+        env: square
+        time: 3.0e-07
+        kwargs: {amp: 0.35, phase: 2.0}
+      - channel: Q0.qdrv      # vz: control local Z (ZI) — LocalPhases writes it
+        env: virtualz
+        time: 0.0
+        freq: single_qubit/0/GE/freq
+        kwargs: {phase: 0.0}
+      - channel: Q1.qdrv      # vz: target local Z (IZ)
+        env: virtualz
+        time: 0.0
+        freq: single_qubit/1/GE/freq
+        kwargs: {phase: 0.0}
+      - channel: Q2.qdrv      # vz: the ring spectator's correction — SpectatorPhase writes it
+        env: virtualz
+        time: 0.0
+        freq: single_qubit/2/GE/freq
+        kwargs: {phase: 0.0}
+      dynamical_decoupling:
+        enable: false         # off on X6Y3 — carried opaquely through the round trip
+
+reset:
+  passive:
+    enable: true
+    delay: 2.4e-05            # 2400-batch relax head ≫ T1 = 600 — the RAW-cluster budget
+                              # (separation is T1-decay-bounded, so T1 stays at the 1Q twin's 600
+                              # while relax drops to 0.75x — the FULL chain must fit one CI run)
+
+hardware:
+  sample_rate: {DAC: 1600000000.0, ADC: 400000000.0}
+  interpolation_ratio: {qdrv: 4, rdrv: 16, rdlo: 4}

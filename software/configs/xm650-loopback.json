@@ -1,0 +1,19 @@
+{
+    "name": "xm650-loopback",
+    "qubit_num": 2,
+    "dac_num": 16,
+    "adc_num": 16,
+    "dac_map": [[0, 0], [1, 1]],
+    "adc_map": [14, 15],
+    "mem_depth": 4096,
+    "env_depth": 1024,
+    "rob_depth": 1024,
+    "gate_pulse_num": 8,
+    "gate_interp": 1,
+    "readout_interp": 1,
+    "demod_interp": 1,
+    "link_pipe": 4,
+    "queue_depth": 4,
+    "with_mul": true,
+    "dsp_freq_hz": 500000000.0
+}

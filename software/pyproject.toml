@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "riscq"
+version = "0.1.0"
+description = "Control software for the riscq PulseTableSoc"
+requires-python = ">=3.10"
+dependencies = ["numpy", "Pyro5"]
+
+# scipy is host-side only (riscq.cal.fits); the offline board install stays numpy+Pyro5
+[project.optional-dependencies]
+cal = ["scipy"]
+
+[project.scripts]
+riscq-board-server = "riscq.board.server:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["riscq*"]

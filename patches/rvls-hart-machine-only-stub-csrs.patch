@@ -1,0 +1,50 @@
+diff --git a/src/hart.cpp b/src/hart.cpp
+index b75bee0..3206893 100644
+--- a/src/hart.cpp
++++ b/src/hart.cpp
+@@ -113,6 +113,20 @@ const char* SpikeIf::get_symbol(uint64_t addr)  {
+ }
+ 
+ 
++// A CSR that exists only so a machine-only Spike won't trap where a machine-only, WARL-stubbing
++// DUT (e.g. riscq) simply commits. It stores writes / reads them back like a plain register, but
++// -- unlike basic_csr_t -- its permission check enforces only the numeric privilege level and
++// skips the "the S/H extension must be enabled" gate, so M-mode may touch S-level CSRs (satp,
++// stvec, ...) whose extension isn't present in a machine-only ISA.
++class stub_csr_t : public basic_csr_t {
++ public:
++  stub_csr_t(processor_t* const p, const reg_t addr) : basic_csr_t(p, addr, 0) {}
++  void verify_permissions(insn_t insn, bool write) const override {
++    if (state->prv < ((address >> 8) & 0x3))   // CSR address bits [9:8] = its privilege level
++      throw trap_illegal_instruction(insn.bits());
++  }
++};
++
+ 
+ Hart::Hart(u32 hartId, string isa, string priv, u32 physWidth, u32 pmpNum, CpuMemoryView *memory, FILE *logs){
+     this->memory = memory;
+@@ -134,6 +148,24 @@ Hart::Hart(u32 hartId, string isa, string priv, u32 physWidth, u32 pmpNum, CpuMe
+     state->csrmap[CSR_MCYCLEH] = std::make_shared<basic_csr_t>(proc, CSR_MCYCLEH, 0);
+     state->csrmap[CSR_CYCLE] = std::make_shared<counter_proxy_csr_t>(proc, CSR_CYCLE, state->csrmap[CSR_MCYCLE]);
+     state->csrmap[CSR_CYCLEH] = std::make_shared<counter_proxy_csr_t>(proc, CSR_CYCLEH, state->csrmap[CSR_MCYCLEH]);
++
++    // Machine-mode-only DUT support (e.g. riscq): the riscv-tests "-p" startup still pokes a few
++    // S-mode / delegation / PMP CSRs behind its "temporary mtvec skips an illegal write" guard,
++    // and such a core answers them as write-ignored / read-zero WARL stubs rather than trapping.
++    // Spike does register these CSRs in csrmap even when the extension is absent, but their real
++    // objects' verify_permissions() throws an illegal-instruction trap (no S / no PMP), so a
++    // machine-only Spike would trap where the DUT just commits. Replace each with a permissive
++    // no-op stub, but only along the axis the DUT actually lacks -- when S is present (VexiiRiscv's
++    // S/U configs) or real PMP is configured, leave the genuine CSRs untouched.
++    if (!proc->extension_enabled('S')) {
++        for (reg_t csr : {CSR_SSTATUS, CSR_SIE, CSR_STVEC, CSR_SSCRATCH, CSR_SEPC, CSR_SCAUSE,
++                          CSR_STVAL, CSR_SIP, CSR_SATP, CSR_MEDELEG, CSR_MIDELEG})
++            state->csrmap[csr] = std::make_shared<stub_csr_t>(proc, csr);
++    }
++    if (pmpNum == 0) {
++        for (reg_t csr : {CSR_PMPCFG0, CSR_PMPADDR0})
++            state->csrmap[csr] = std::make_shared<stub_csr_t>(proc, csr);
++    }
+ }
+ 
+ void Hart::close() {

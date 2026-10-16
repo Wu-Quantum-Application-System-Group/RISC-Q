@@ -1,0 +1,31 @@
+{
+    "name": "x6y3-multimode",
+    "dsp_freq_hz": 500000000.0,
+    "dac_num": 16,
+    "adc_num": 16,
+    "link_pipe": 2,
+    "hostwin_bits": 23,
+    "rob_depth": 1024,
+    "adc_pipe": 3,
+    "core_defaults": {"mem_depth": 8192, "with_mul": true, "queue_depth": 32},
+    "cores": [
+        {"name": "q0", "role": "qubit", "channels": [
+            {"name": "gate",       "kind": "pulse", "dac": 0,  "slots": 32, "env_depth": 4096, "interp": 4},
+            {"name": "f0g1",       "kind": "pulse", "dac": 1,  "slots": 8,  "env_depth": 4096, "interp": 4},
+            {"name": "flux_low",   "kind": "pulse", "dac": 2,  "slots": 8,  "env_depth": 4096, "interp": 4},
+            {"name": "flux_high",  "kind": "pulse", "dac": 3,  "slots": 8,  "env_depth": 4096, "interp": 4},
+            {"name": "manipulate", "kind": "pulse", "dac": 4,  "slots": 8,  "env_depth": 4096, "interp": 4},
+            {"name": "ro",         "kind": "pulse", "dac": 8,  "slots": 1,  "env_depth": 4096, "interp": 16, "trace": true},
+            {"name": "demod",      "kind": "demod", "adc": 12, "slots": 1,  "env_depth": 4096, "interp": 4}
+        ]},
+        {"name": "q1", "role": "qubit", "channels": [
+            {"name": "gate",       "kind": "pulse", "dac": 5,  "slots": 32, "env_depth": 4096, "interp": 4},
+            {"name": "f0g1",       "kind": "pulse", "dac": 6,  "slots": 8,  "env_depth": 4096, "interp": 4},
+            {"name": "flux_low",   "kind": "pulse", "dac": 7,  "slots": 8,  "env_depth": 4096, "interp": 4},
+            {"name": "flux_high",  "kind": "pulse", "dac": 9,  "slots": 8,  "env_depth": 4096, "interp": 4},
+            {"name": "manipulate", "kind": "pulse", "dac": 10, "slots": 8,  "env_depth": 4096, "interp": 4},
+            {"name": "ro",         "kind": "pulse", "dac": 8,  "slots": 1,  "env_depth": 4096, "interp": 16, "trace": true},
+            {"name": "demod",      "kind": "demod", "adc": 12, "slots": 1,  "env_depth": 4096, "interp": 4}
+        ]}
+    ]
+}

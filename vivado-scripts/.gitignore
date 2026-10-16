@@ -1,0 +1,6 @@
+# Stray Vivado / mill artifacts. Build outputs land in <repo>/build/<project> (git-ignored at the root),
+# not here, so vivado-scripts/ should stay clean — these just catch anything run in-place.
+out/
+*.log
+*.jou
+.Xil/

@@ -1,0 +1,25 @@
+{
+    "name": "sim-mm",
+    "dsp_freq_hz": 500000000.0,
+    "dac_num": 16,
+    "adc_num": 16,
+    "link_pipe": 4,
+    "hostwin_bits": 24,
+    "rob_depth": 1024,
+    "adc_pipe": 3,
+    "core_defaults": {"mem_depth": 4096, "with_mul": true, "queue_depth": 4},
+    "cores": [
+        {"name": "q0", "role": "qubit", "channels": [
+            {"name": "gate",      "kind": "pulse", "dac": 0,  "slots": 8, "env_depth": 1024, "interp": 4},
+            {"name": "f0g1",      "kind": "pulse", "dac": 1,  "slots": 8, "env_depth": 1024, "interp": 4},
+            {"name": "flux",      "kind": "pulse", "dac": 2,  "slots": 8, "env_depth": 1024, "interp": 4},
+            {"name": "ro",        "kind": "pulse", "dac": 14, "slots": 1, "env_depth": 1024, "interp": 16, "trace": true},
+            {"name": "demod",     "kind": "demod", "adc": 0,  "slots": 1, "env_depth": 1024, "interp": 4}
+        ]},
+        {"name": "q1", "role": "qubit", "channels": [
+            {"name": "gate",      "kind": "pulse", "dac": 3,  "slots": 8, "env_depth": 1024, "interp": 4},
+            {"name": "ro",        "kind": "pulse", "dac": 14, "slots": 1, "env_depth": 1024, "interp": 16, "trace": true},
+            {"name": "demod",     "kind": "demod", "adc": 0,  "slots": 1, "env_depth": 1024, "interp": 4}
+        ]}
+    ]
+}

@@ -1,0 +1,17 @@
+{
+    "name": "sim-2q",
+    "qubit_num": 2,
+    "dac_num": 16,
+    "adc_num": 16,
+    "mem_depth": 4096,
+    "env_depth": 1024,
+    "rob_depth": 1024,
+    "gate_pulse_num": 8,
+    "gate_interp": 4,
+    "readout_interp": 16,
+    "demod_interp": 4,
+    "link_pipe": 4,
+    "queue_depth": 4,
+    "with_mul": false,
+    "dsp_freq_hz": 100000000.0
+}

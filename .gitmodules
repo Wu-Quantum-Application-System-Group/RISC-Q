@@ -1,0 +1,11 @@
+[submodule "ext/SpinalHDL"]
+	path = ext/SpinalHDL
+	url = https://github.com/SpinalHDL/SpinalHDL
+	branch = v1.14.2
+[submodule "ext/rvls"]
+	path = ext/rvls
+	url = https://github.com/JunyiLiu1994/rvls.git
+	branch = riscq-machine-only-csr-stubs
+[submodule "ext/NaxSoftware"]
+	path = ext/NaxSoftware
+	url = https://github.com/SpinalHDL/NaxSoftware.git

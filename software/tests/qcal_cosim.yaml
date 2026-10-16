@@ -1,0 +1,85 @@
+# A co-sim-scaled qcal config, in qcal's tree shape, loaded via Config.from_qcal.
+#
+# It carries the SAME numbers the co-sim TwoLevelModel world needs — the ones test_cal._cfg builds by
+# hand for the sim-2q build (dsp 100 MHz): qubit freq = F_GE (50 MHz, freq code 2048), readout freq =
+# demod_code_to_freq(2048) = 12.5 MHz (so the demod carrier lands on the model's tone code 2048), a
+# 40-batch demod window under a 56-batch drive, a 3200-batch relax head — but expressed as a real qcal
+# tree so the parity path (from_qcal → the chain) is exercised. Times are seconds (n / dsp = n·1e-8 s);
+# the gate envelope is `square` at 4 batches, which on the gate channel (4 samples/line) is exactly the
+# 16-sample GATE_ENV every co-sim planted-rabi number is scaled to.
+
+single_qubit:
+  0:
+    GE:
+      freq: 50000000.0        # F_GE — DAC freq code 2048
+      T1: 1.2e-06             # 120 batches (unused by the X6Y3 chain; from_qcal needs it present)
+      T2*: 2.0e-06            # 200 batches
+      X90:
+        pulse:
+        - channel: Q0.qdrv
+          env: virtualz
+          time: 0.0
+          kwargs: {phase: 0.0}
+        - channel: Q0.qdrv
+          env: square         # 4 batches on the gate channel == square(16) == GATE_ENV
+          time: 4.0e-08
+          kwargs: {amp: 0.5, phase: 0.0}
+        - channel: Q0.qdrv
+          env: virtualz
+          time: 0.0
+          kwargs: {phase: 0.0}
+      X:
+        pulse:                # a double-length square (never played — the chain preps X90; from_qcal needs it)
+        - channel: Q0.qdrv
+          env: square
+          time: 8.0e-08
+          kwargs: {amp: 0.495, phase: 0.0}
+    EF:                       # the EF subspace (from_qcal REQUIRES it;
+      freq: 40000000.0        # never played by the 1Q chain, same shape as examples/)
+      T1: 6.0e-07
+      T2*: 1.0e-06
+      X90:
+        pulse:
+        - channel: Q0.qdrv
+          env: virtualz
+          time: 0.0
+          kwargs: {phase: 0.0}
+        - channel: Q0.qdrv
+          env: square
+          time: 4.0e-08
+          kwargs: {amp: 0.4, phase: 0.0}
+        - channel: Q0.qdrv
+          env: virtualz
+          time: 0.0
+          kwargs: {phase: 0.0}
+      X:
+        pulse:
+        - channel: Q0.qdrv
+          env: square
+          time: 8.0e-08
+          kwargs: {amp: 0.4, phase: 0.0}
+
+readout:
+  0:
+    channel: 0
+    freq: 12500000.0          # demod_code_to_freq(2048) — the demod carrier resonates the model tone
+    amp: 0.5
+    time: 5.6e-07             # 56-batch drive (covers the 40-batch window + SEP)
+    env: square
+    kwargs: {}
+    demod:
+      delay: 0.0              # the ADC round trip is 0 in co-sim
+      phase: 0.0              # degrees; ReadoutCalibration measures and overwrites this
+      time: 4.0e-07           # 40-batch integration window
+      env: square
+      kwargs: {amp: 1.0}
+  herald: false               # heralding is deferred; the chain runs without it
+
+reset:
+  passive:
+    enable: true
+    delay: 3.2e-05            # 3200-batch relax head = RO_RELAX (≫ RO_T1, resets to |0> each grid slot)
+
+hardware:
+  sample_rate: {DAC: 1600000000.0, ADC: 400000000.0}
+  interpolation_ratio: {qdrv: 4, rdrv: 16, rdlo: 4}

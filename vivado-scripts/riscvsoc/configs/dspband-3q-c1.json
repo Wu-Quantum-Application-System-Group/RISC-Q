@@ -1,0 +1,19 @@
+{
+    "name": "dspband-3q-c1",
+    "qubit_num": 3,
+    "dac_num": 16,
+    "adc_num": 16,
+    "mem_depth": 4096,
+    "env_depth": 1024,
+    "rob_depth": 1024,
+    "gate_pulse_num": 8,
+    "gate_interp": 4,
+    "readout_interp": 16,
+    "demod_interp": 4,
+    "link_pipe": 4,
+    "with_mul": false,
+
+    "queue_reg_head": true,
+    "adc_pipe": 4,
+    "dsp_freq_hz": 500000000.0
+}

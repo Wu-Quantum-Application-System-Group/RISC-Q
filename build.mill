@@ -1,0 +1,40 @@
+//| mill-allow-nested-build-mill: true
+//| mvnDeps:
+//| - com.typesafe:config:1.4.3
+package build
+import mill._, scalalib._
+
+val buildScalaVersion = "2.12.18"
+
+object `package` extends ScalaModule {
+  def scalaVersion = buildScalaVersion
+  def moduleInfo = build.ext.SpinalHDL.SpinalModuleInfo(buildScalaVersion)
+  def moduleRefs = moduleInfo._1
+  def modulePluginOptions = moduleInfo._2()
+
+  override def moduleDeps = Seq(moduleRefs("core"), moduleRefs("lib"), moduleRefs("idslplugin"), moduleRefs("sim"))
+
+  override def scalacOptions = super.scalacOptions() ++ modulePluginOptions()
+
+  // RVLS Spike-lockstep bindings from the `ext/rvls` submodule, compiled directly so RVLS trace /
+  // lock-step is available without depending on the VexiiRiscv core (konata + spinal.lib.misc.Elf
+  // are vendored under src/ for the same reason).
+  def rvlsJniSource    = Task.Sources("ext/rvls/bindings/jni")
+  def rvlsSpinalSource = Task.Sources("ext/rvls/bindings/spinal")
+  override def sources = Task { super.sources() ++ rvlsJniSource() ++ rvlsSpinalSource() }
+
+  override def mvnDeps = Seq(
+    mvn"org.scalatest::scalatest:3.2.17",
+    mvn"net.fornwall:jelf:0.7.0", // jelf backs the vendored spinal.lib.misc.Elf
+    mvn"com.lihaoyi::ujson:3.3.1", // shared python<->Scala per-build SocParams JSON (GenPulseTableSocJson)
+  )
+
+  object test extends ScalaTests {
+    def mvnDeps = Seq(
+      mvn"com.lihaoyi::utest:0.8.5",
+      mvn"org.playframework::play-json:3.0.5",
+    )
+    def testFramework = "utest.runner.Framework"
+    def testSandboxWorkingDir = false
+  }
+}

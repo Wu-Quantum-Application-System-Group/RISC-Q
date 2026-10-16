@@ -1,0 +1,14 @@
+out/
+.idea/
+.bsp/
+.metals/
+.bloop/
+.vscode/
+/*.v
+/*.vhd
+*.bin
+simWorkspace
+/build/
+/bench/
+/src/scratch
+.Xil/
